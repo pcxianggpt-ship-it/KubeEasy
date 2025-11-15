@@ -382,42 +382,29 @@ done
 echo "OK: SSH key distribution completed"
 ```
 
-### 4.3 step03_install_dependencies.sh
+### 4.3 step03_k8s_install.sh
 ```bash
 #!/bin/bash
-# 系统依赖安装（基于 installscript/04.Dependency-Package-*.sh）
+# Kubernetes 组件安装（基于 installscript/04.Dependency-Package-*.sh）
 
 k8s_version=$(yaml_get '.global.kubernetes_version' config.yaml)
 packages_dir=$(yaml_get '.global.packages_dir' config.yaml)
 arch=$(detect_arch)
 
-# 1. 安装系统依赖包（先安装依赖）
-system_rpm_dir="${packages_dir}/01.rpm_package/system"
-if [[ -d "$system_rpm_dir" ]]; then
-    echo "Installing system dependencies..."
-    if ! rpm -ivh ${system_rpm_dir}/*.rpm; then
-        echo "ERROR: System dependencies installation failed"
-        echo "Please check the missing dependencies and install them manually"
-        exit 1
-    fi
-    echo "OK: System dependencies installed"
-fi
-
-# 2. 安装 Kubernetes RPM 包
+# 1. 安装 Kubernetes RPM 包
 k8s_rpm_dir="${packages_dir}/01.rpm_package/k8s-${k8s_version}"
 
 if [[ -d "$k8s_rpm_dir" ]]; then
-    echo "Installing Kubernetes packages..."
-    if ! rpm -ivh ${k8s_rpm_dir}/*.rpm; then
-        echo "ERROR: Kubernetes packages installation failed"
-        echo "Please check the missing dependencies and install them manually"
-        echo "You may need to install: conntrack-tools, socat, ebtables, etc."
-        exit 1
-    fi
-    echo "OK: Kubernetes packages installed"
+    rpm -ivh ${k8s_rpm_dir}/*.rpm
 else
-    echo "ERROR: Kubernetes RPM packages not found in $k8s_rpm_dir"
+    echo "ERROR: Kubernetes RPM packages not found"
     exit 1
+fi
+
+# 2. 安装系统依赖包
+system_rpm_dir="${packages_dir}/01.rpm_package/system"
+if [[ -d "$system_rpm_dir" ]]; then
+    rpm -ivh ${system_rpm_dir}/*.rpm
 fi
 
 # 3. 替换 kubeadm 二进制（支持 99 年证书）
@@ -770,83 +757,48 @@ local_ip=$(get_local_ip)
 registry_user=$(yaml_get '.global.registry_user' config.yaml)
 registry_pass=$(yaml_get '.global.registry_pass' config.yaml)
 packages_dir=$(yaml_get '.global.packages_dir' config.yaml)
-arch=$(detect_arch)
 
-# 1. 确保 Docker 已安装并运行
-if ! systemctl is-active docker >/dev/null 2>&1; then
-    echo "ERROR: Docker is not running. Please install container runtime first."
-    exit 1
+# 1. 加载 Registry 镜像
+docker load -i "${packages_dir}/04.registry/registry/registry-2.7.1-$(detect_arch).tar"
+
+# 2. 创建 Registry 数据目录
+mkdir -p /data/registry
+
+# 3. 创建认证配置（如果启用）
+if [[ -n "$registry_user" ]]; then
+    mkdir -p /data/registry/auth
+    docker run --rm --entrypoint htpasswd registry:2.7.1 \
+        -Bbn "$registry_user" "$registry_pass" > /data/registry/auth/htpasswd
 fi
 
-# 2. 进入 registry 安装包目录
-cd "${packages_dir}/04.registry/"
-
-# 3. 加载 Registry 镜像
-echo "----正在导入镜像----"
-docker load -i registry-2.7.1-${arch}.tar > /dev/null 2>&1
-docker load -i registry-ui-${arch}.tar > /dev/null 2>&1
-
-if docker images | grep registry | wc -l | grep -q "2" ; then
-    echo "【SUCCESS】：registry-2.7.1-${arch}.tar、registry-ui-${arch}.tar镜像导入成功"
-else
-    echo "【ERROR】：registry-2.7.1-${arch}.tar、registry-ui-${arch}.tar镜像导入失败"
-    exit 1
-fi
-
-# 4. 解压镜像数据文件
+# 4. 创建 Registry 配置
 echo "----正在解压镜像文件----"
-tar -xzf registry-${arch}.tgz -C /data
+
+tar -xzf registry-$2.tgz  -C /data
 cd /data
 mv registry registry_data
-echo "----镜像文件解压成功----"
 
-# 5. 启动 Registry UI
-cd /data/registry_data
-echo "----正在启动镜像UI----"
-docker run -d --restart=always --name registry-ui-init -p 5080:80 \
-    -e REGISTRY_TITLE=Registry \
-    -e REGISTRY_URL=http://$local_ip:5000 \
-    -e DELETE_IMAGES=true \
-    joxit/docker-registry-ui:2.2.2
-echo "----镜像UI启动成功----"
+# 5. 启动 Registry 服务
+docker run -d \
+    --name registry \
+    --restart=always \
+    -p 5000:5000 \
+    -v /data/registry:/var/lib/registry \
+    -v /etc/docker/registry/config.yml:/etc/docker/registry/config.yml:ro \
+    registry:2.7.1
 
-# 6. 启动 Registry 服务
-echo "----正在启动镜像服务----"
+# 6. （可选）启动 Registry UI
+if [[ -f "${packages_dir}/04.registry/registry-ui-${arch}.tar" ]]; then
+    docker load -i "${packages_dir}/04.registry/registry-ui-${arch}.tar"
 
-# 检查是否启用认证
-if [[ -n "$registry_user" && "$registry_user" != "" ]]; then
-    echo "镜像仓库用户名为 $registry_user"
-    echo "镜像仓库密码为 $registry_pass"
-
-    set -e
-    V_USER=$registry_user  # 访问镜像仓库的用户名
-    V_PASSWORD=$registry_pass # 访问镜像仓库的密码
-    rm -rf auth
-    mkdir -p auth
-    echo "创建auth路径"
-    echo "创建密钥"
-    htpasswd -bBc `pwd`/auth/htpasswd $V_USER $V_PASSWORD
-    echo "finish htpasswd ......"
-    echo "start:docker run ......"
-    docker run -d --name registry-init \
-        -p 5000:5000 \
-        -v `pwd`/registry:/var/lib/registry \
-        -v `pwd`/config.yml:/etc/docker/registry/config.yml \
-        -v `pwd`/auth:/etc/docker/registry/auth \
-        -e "REGISTRY_AUTH=htpasswd" \
-        -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
-        -e "REGISTRY_AUTH_HTPASSWD_PATH=/etc/docker/registry/auth/htpasswd" \
-        registry:2.7.1
-    echo "finish:docker run ......"
-else
-    # 无认证模式，使用压缩包中的config.yml文件
-    docker run -d --restart=always --name registry-init -p 5000:5000 \
-        -v `pwd`/registry:/var/lib/registry \
-        -v `pwd`/config.yml:/etc/docker/registry/config.yml \
-        registry:2.7.1
+    docker run -d \
+        --name registry-ui \
+        --restart=always \
+        -p 8080:80 \
+        -e REGISTRY_URL=http://$local_ip:5000 \
+        -e DELETE_IMAGES=true \
+        joxit/docker-registry-ui:static
 fi
-
-echo "----镜像服务启动成功----"
 
 echo "OK: Registry installation completed"
 ```
@@ -1155,33 +1107,7 @@ else
 fi
 ```
 
-### 5.3 verify03_dependencies.sh
-```bash
-#!/bin/bash
-# 验证系统依赖安装
-
-# 1. 检查系统工具是否可用
-missing_tools=()
-for tool in wget curl jq; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        missing_tools+=("$tool")
-    fi
-done
-
-if [[ ${#missing_tools[@]} -gt 0 ]]; then
-    echo "NOT_OK: Missing tools: ${missing_tools[*]}"
-    exit 1
-fi
-
-# 2. 检查 yq 工具（可选）
-if ! command -v yq >/dev/null 2>&1; then
-    echo "WARN: yq not found, using built-in YAML parser"
-fi
-
-echo "OK"
-```
-
-### 5.4 verify04_env.sh
+### 5.3 verify03_env.sh
 ```bash
 #!/bin/bash
 # 验证系统环境配置
@@ -1245,7 +1171,7 @@ fi
 echo "OK"
 ```
 
-### 5.5 verify05_dns.sh
+### 5.4 verify04_dns.sh
 ```bash
 #!/bin/bash
 # 验证 DNS 配置
@@ -1259,7 +1185,7 @@ else
 fi
 ```
 
-### 5.6 verify06_yum.sh
+### 5.5 verify05_yum.sh
 ```bash
 #!/bin/bash
 # 验证 YUM 源配置
@@ -1271,7 +1197,7 @@ else
 fi
 ```
 
-### 5.7 verify07_container_runtime.sh
+### 5.6 verify06_container_runtime.sh
 ```bash
 #!/bin/bash
 # 验证容器运行时
@@ -1297,7 +1223,7 @@ else
 fi
 ```
 
-### 5.8 verify08_registry.sh
+### 5.7 verify07_registry.sh
 ```bash
 #!/bin/bash
 # 验证镜像仓库
@@ -1312,7 +1238,7 @@ else
 fi
 ```
 
-### 5.9 verify09_k8s_components.sh
+### 5.8 verify08_k8s_components.sh
 ```bash
 #!/bin/bash
 # 验证 Kubernetes 组件安装
@@ -1344,7 +1270,7 @@ fi
 echo "OK"
 ```
 
-### 5.10 verify10_cluster.sh
+### 5.9 verify09_cluster.sh
 ```bash
 #!/bin/bash
 # 验证集群状态
@@ -1370,7 +1296,7 @@ fi
 echo "OK"
 ```
 
-### 5.11 verify11_admin_conf.sh
+### 5.10 verify10_admin_conf.sh
 ```bash
 #!/bin/bash
 # 验证 kubectl 配置
@@ -1383,7 +1309,7 @@ else
 fi
 ```
 
-### 5.12 verify12_join_controlplane.sh
+### 5.11 verify11_join_controlplane.sh
 ```bash
 #!/bin/bash
 # 验证控制平面节点加入
@@ -1398,7 +1324,7 @@ else
 fi
 ```
 
-### 5.13 verify13_join_worker.sh
+### 5.12 verify12_join_worker.sh
 ```bash
 #!/bin/bash
 # 验证工作节点加入
@@ -1413,7 +1339,7 @@ else
 fi
 ```
 
-### 5.14 verify14_cni.sh
+### 5.13 verify13_cni.sh
 ```bash
 #!/bin/bash
 # 验证 CNI 安装
@@ -1437,7 +1363,7 @@ fi
 echo "OK"
 ```
 
-### 5.15 verify15_nfs.sh
+### 5.14 verify14_nfs.sh
 ```bash
 #!/bin/bash
 # 验证 NFS 配置
@@ -1463,7 +1389,7 @@ else
 fi
 ```
 
-### 5.16 verify16_certificates.sh
+### 5.15 verify15_certificates.sh
 ```bash
 #!/bin/bash
 # 验证证书有效期
@@ -1495,7 +1421,7 @@ config.yaml 是整个系统的驱动配置文件，包含所有必要的参数�
 nodes:
   - id: k8s-master01
     ip: 192.168.62.171
-    ipv6: "fd00::171"            # 可选
+    ipv6: "fd00:42::171"            # 可选
     ssh_user: root
     ssh_pass: Kylin123123        # 建议使用密钥而非密码
     roles: [control-plane, etcd]
@@ -1505,7 +1431,7 @@ nodes:
 
   - id: k8s-master02
     ip: 192.168.62.172
-    ipv6: "fd00::172"            # IPv6 地址
+    ipv6: "fd00:42::172"            # IPv6 地址
     ssh_user: root
     ssh_pass: Kylin123123
     roles: [control-plane, etcd]
@@ -1513,7 +1439,7 @@ nodes:
 
   - id: k8s-master03
     ip: 192.168.62.173
-    ipv6: "fd00::173"            # IPv6 地址
+    ipv6: "fd00:42::173"            # IPv6 地址
     ssh_user: root
     ssh_pass: Kylin123123
     roles: [control-plane, etcd]
@@ -1521,7 +1447,7 @@ nodes:
 
   - id: k8s-worker01
     ip: 192.168.62.174
-    ipv6: "fd00::174"            # IPv6 地址
+    ipv6: "fd00:42::174"            # IPv6 地址
     ssh_user: root
     ssh_pass: Kylin123123
     roles: [worker]
@@ -1529,7 +1455,7 @@ nodes:
 
   - id: k8s-worker02
     ip: 192.168.62.175
-    ipv6: "fd00::175"            # IPv6 地址
+    ipv6: "fd00:42::175"            # IPv6 地址
     ssh_user: root
     ssh_pass: Kylin123123
     roles: [worker]
@@ -1550,13 +1476,13 @@ global:
 
   # IPv6 网络配置
   enable_ipv6: true              # 启用 IPv6 支持
-  ipv6_pod_network_cidr: "fd00:10:244::/64"  # IPv6 Pod 网络
-  ipv6_service_subnet: "fd00:10:96::/112"     # IPv6 Service 网络
+  ipv6_pod_network_cidr: "fd10:244::/56"  # IPv6 Pod 网络
+  ipv6_service_subnet: "fd10:96::/112"     # IPv6 Service 网络
   ipv6_default_gateway: "fd00::1"             # IPv6 默认网关
 
   # 网络配置
   dns_server: "114.114.114.114"
-  dns_server_ipv6: "2001:4860:4860::8888"      # IPv6 DNS 服务器
+  dns_server_ipv6: "fd00:42::1"      # IPv6 DNS 服务器
   yum_server_ip: "192.168.62.171"
 
   # 镜像仓库配置
@@ -1564,7 +1490,7 @@ global:
   registry_port: 5000
   registry_user: "admin"
   registry_pass: "admin123"
-  registry_insecure: true
+  registry_insecure: false
 
   # NFS 配置
   nfs_server: "192.168.62.171"
@@ -1855,10 +1781,10 @@ backup:
 
 ##### IPv6 配置项
 - **enable_ipv6**: 是否启用 IPv6 支持（true/false）
-- **ipv6_pod_network_cidr**: IPv6 Pod 网络 CIDR（例如：fd00:10:244::/64）
-- **ipv6_service_subnet**: IPv6 Service 网络 CIDR（例如：fd00:10:96::/112）
+- **ipv6_pod_network_cidr**: IPv6 Pod 网络 CIDR（例如：fd10:244::/56）
+- **ipv6_service_subnet**: IPv6 Service 网络 CIDR（例如：fd10:96::/112）
 - **ipv6_default_gateway**: IPv6 默认网关（例如：fd00::1）
-- **dns_server_ipv6**: IPv6 DNS 服务器（例如：2001:4860:4860::8888）
+- **dns_server_ipv6**: IPv6 DNS 服务器（例如：fd00::1）
 
 ##### 网卡配置参数
 每个节点的网卡配置支持以下参数：
@@ -2051,38 +1977,36 @@ k8s_installer/                   # 项目根目录
 ├── steps/                       # 标准化步骤脚本
 │   ├── step01_check_root.sh
 │   ├── step02_ssh_key.sh
-│   ├── step03_install_dependencies.sh
-│   ├── step04_env_prepare.sh
-│   ├── step05_dns_config.sh
-│   ├── step06_yum_server.sh
-│   ├── step07_yum_client.sh
-│   ├── step08_container_runtime.sh
-│   ├── step09_registry_install.sh
-│   ├── step10_k8s_install.sh
-│   ├── step11_cluster_init.sh
-│   ├── step12_admin_conf.sh
-│   ├── step13_join_controlplane.sh
-│   ├── step14_join_worker.sh
-│   ├── step15_cni_install.sh
-│   └── step16_nfs_config.sh
+│   ├── step03_env_prepare.sh
+│   ├── step04_dns_config.sh
+│   ├── step05_yum_server.sh
+│   ├── step06_yum_client.sh
+│   ├── step07_container_runtime.sh
+│   ├── step08_registry_install.sh
+│   ├── step09_k8s_install.sh
+│   ├── step10_cluster_init.sh
+│   ├── step11_admin_conf.sh
+│   ├── step12_join_controlplane.sh
+│   ├── step13_join_worker.sh
+│   ├── step14_cni_install.sh
+│   └── step15_nfs_config.sh
 │
 ├── verify/                      # 验证脚本
 │   ├── verify01_root.sh
 │   ├── verify02_ssh.sh
-│   ├── verify03_dependencies.sh
-│   ├── verify04_env.sh
-│   ├── verify05_dns.sh
-│   ├── verify06_yum.sh
-│   ├── verify07_container_runtime.sh
-│   ├── verify08_registry.sh
-│   ├── verify09_k8s_components.sh
-│   ├── verify10_cluster.sh
-│   ├── verify11_admin_conf.sh
-│   ├── verify12_join_controlplane.sh
-│   ├── verify13_join_worker.sh
-│   ├── verify14_cni.sh
-│   ├── verify15_nfs.sh
-│   └── verify16_certificates.sh
+│   ├── verify03_env.sh
+│   ├── verify04_dns.sh
+│   ├── verify05_yum.sh
+│   ├── verify06_container_runtime.sh
+│   ├── verify07_registry.sh
+│   ├── verify08_k8s_components.sh
+│   ├── verify09_cluster.sh
+│   ├── verify10_admin_conf.sh
+│   ├── verify11_join_controlplane.sh
+│   ├── verify12_join_worker.sh
+│   ├── verify13_cni.sh
+│   ├── verify14_nfs.sh
+│   └── verify15_certificates.sh
 │
 ├── templates/                   # 配置模板
 │   ├── kubeadm-config.yaml.template
@@ -2211,7 +2135,7 @@ sysctl -w net.ipv6.conf.lo.disable_ipv6=0
 # 自动生成 /etc/sysconfig/network-scripts/ifcfg-eth0 配置
 IPV6INIT=yes
 IPV6_AUTOCONF=no
-IPV6ADDR=fd00::176
+IPV6ADDR=fd00:42::176
 IPV6_DEFAULTGW=fd00::1
 IPV6_DEFROUTE=yes
 IPV6_FAILURE_FATAL=no
@@ -2227,8 +2151,8 @@ cat > kubeadm-config.yaml << EOF
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 networking:
-  podSubnet: "10.244.0.0/16,fd00:10:244::/64"
-  serviceSubnet: "10.96.0.0/12,fd00:10:96::/112"
+  podSubnet: "10.244.0.0/16,fd10:244::/56"
+  serviceSubnet: "10.96.0.0/12,fd10:96::/112"
 EOF
 
 # 2. 初始化集群
@@ -2239,8 +2163,8 @@ kubeadm init --config=kubeadm-config.yaml
 
 #### 9.3.1 网络规划
 - **节点 IPv6 地址**: 使用 fd00::/64 前缀的连续地址
-- **Pod IPv6 网络**: 使用 fd00:10:244::/64，避免与节点地址冲突
-- **Service IPv6 网络**: 使用 fd00:10:96::/112，提供足够的地址空间
+- **Pod IPv6 网络**: 使用 fd10:244::/56，避免与节点地址冲突
+- **Service IPv6 网络**: 使用 fd10:96::/112，提供足够的地址空间
 - **默认网关**: 使用 fd00::1 作为 IPv6 网关
 
 #### 9.3.2 配置验证
@@ -2255,7 +2179,7 @@ sysctl net.ipv6.conf.all.forwarding
 ping6 -c 3 fd00::1
 
 # 验证 Pod IPv6 连通性
-kubectl exec -it <pod> -- ping6 -c 3 2001:4860:4860::8888
+kubectl exec -it <pod> -- ping6 -c 3 fd00::1
 ```
 
 ### 9.4 IPv6 故障排除
@@ -2289,7 +2213,7 @@ cat /proc/sys/net/ipv6/conf/all/forwarding
 nodes:
   - id: k8s-master01
     ip: 192.168.62.171
-    ipv6: "fd00::171"
+    ipv6: "fd00:42::171"
     ssh_user: root
     roles: [control-plane, etcd]
 
@@ -2297,13 +2221,13 @@ global:
   enable_ipv6: true
   pod_network_cidr: "10.244.0.0/16"
   service_subnet: "10.96.0.0/12"
-  ipv6_pod_network_cidr: "fd00:10:244::/64"
-  ipv6_service_subnet: "fd00:10:96::/112"
+  ipv6_pod_network_cidr: "fd10:244::/56"
+  ipv6_service_subnet: "fd10:96::/112"
   ipv6_default_gateway: "fd00::1"
-  dns_server_ipv6: "2001:4860:4860::8888"
+  dns_server_ipv6: "fd00::1"
 
 network_policies:
   enable_ipv6: true
-  ipv6_cidr: "fd00:10:244::/64"
-  ipv6_service_cidr: "fd00:10:96::/112"
+  ipv6_cidr: "fd10:244::/56"
+  ipv6_service_cidr: "fd10:96::/112"
 ```
