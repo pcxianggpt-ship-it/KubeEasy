@@ -27,7 +27,7 @@
 - 每个安装模块对应的 `step_*.sh`：每一步的安装逻辑（含"安装器"与"验证器"两部分）。
 - `verify_*.sh`：验证脚本，用于判断安装是否完成/生效（可被单独调试）。
 - `config.yaml` / `config.json`：所有变量集中管理，支持面向对象式（节点对象）配置。
-- `packages/`：预先上传的离线安装包与镜像（包括 rpm、tar、镜像归档）。
+- `packages/`：预先上传的离线安装包与镜像（包括 rpm、tar、镜像归档）路径由global.packages_dir参数控制。
 - `installscript/`：基于现有脚本的安装模块集合，包含以下关键组件：
   - `0.ssh_nopasswd.sh`：SSH免密登录配置
   - `01.set-env.sh`：系统环境准备（关闭swap、防火墙、内核参数配置）
