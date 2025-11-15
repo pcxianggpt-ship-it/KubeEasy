@@ -382,7 +382,73 @@ done
 echo "OK: SSH key distribution completed"
 ```
 
-### 4.3 step03_env_prepare.sh
+### 4.3 step03_install_dependencies.sh
+```bash
+#!/bin/bash
+# 系统依赖安装（基于 installscript/04.Dependency-Package-*.sh）
+
+k8s_version=$(yaml_get '.global.kubernetes_version' config.yaml)
+packages_dir=$(yaml_get '.global.packages_dir' config.yaml)
+arch=$(detect_arch)
+
+# 1. 安装系统依赖包（先安装依赖）
+system_rpm_dir="${packages_dir}/01.rpm_package/system"
+if [[ -d "$system_rpm_dir" ]]; then
+    echo "Installing system dependencies..."
+    if ! rpm -ivh ${system_rpm_dir}/*.rpm; then
+        echo "ERROR: System dependencies installation failed"
+        echo "Please check the missing dependencies and install them manually"
+        exit 1
+    fi
+    echo "OK: System dependencies installed"
+fi
+
+# 2. 安装 Kubernetes RPM 包
+k8s_rpm_dir="${packages_dir}/01.rpm_package/k8s-${k8s_version}"
+
+if [[ -d "$k8s_rpm_dir" ]]; then
+    echo "Installing Kubernetes packages..."
+    if ! rpm -ivh ${k8s_rpm_dir}/*.rpm; then
+        echo "ERROR: Kubernetes packages installation failed"
+        echo "Please check the missing dependencies and install them manually"
+        echo "You may need to install: conntrack-tools, socat, ebtables, etc."
+        exit 1
+    fi
+    echo "OK: Kubernetes packages installed"
+else
+    echo "ERROR: Kubernetes RPM packages not found in $k8s_rpm_dir"
+    exit 1
+fi
+
+# 3. 替换 kubeadm 二进制（支持 99 年证书）
+if [[ -f "${packages_dir}/01.rpm_package/kubeadm100y-${arch}/kubeadm" ]]; then
+    cp /usr/bin/kubeadm /tmp/kubeadm
+    cp "${packages_dir}/01.rpm_package/kubeadm100y-${arch}/kubeadm" /usr/bin/kubeadm
+    chmod +x /usr/bin/kubeadm
+fi
+
+# 4. 配置 kubelet
+mkdir -p /etc/kubernetes
+cat > /etc/kubernetes/kubelet.env << EOF
+KUBELET_KUBECONFIG_ARGS="--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+KUBELET_CONFIG_ARGS="--config=/var/lib/kubelet/config.yaml"
+KUBELET_SYSTEM_PODS_ARGS="--pod-manifest-path=/etc/kubernetes/manifests"
+KUBELET_NETWORK_ARGS="--network-plugin=cni --cni-conf-dir=/etc/cni/net.d --cni-bin-dir=/opt/cni/bin"
+KUBELET_DNS_ARGS="--cluster-dns=10.96.0.10 --cluster-domain=cluster.local"
+KUBELET_AUTHZ_ARGS="--authorization-mode=Webhook --client-ca-file=/etc/kubernetes/pki/ca.crt"
+KUBELET_CADVISOR_ARGS="--cadvisor-port=0"
+KUBELET_CGROUP_ARGS="--cgroup-driver=systemd"
+KUBELET_EXTRA_ARGS="--container-runtime=remote --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock"
+EOF
+
+# 5. 启用并启动 kubelet
+systemctl enable kubelet
+systemctl start kubelet || true  # kubelet 会在 join 集群后正常启动
+
+echo "OK: Kubernetes components installation completed"
+```
+
+### 4.4 step04_env_prepare.sh
 ```bash
 #!/bin/bash
 # 系统环境准备（基于 installscript/01.set-env.sh）
@@ -494,7 +560,7 @@ sysctl --system
 echo "OK: Environment preparation completed"
 ```
 
-### 4.4 step04_dns_config.sh
+### 4.5 step05_dns_config.sh
 ```bash
 #!/bin/bash
 # DNS 配置（基于 installscript/01.dns.sh）
@@ -521,7 +587,7 @@ fi
 echo "OK: DNS configuration completed"
 ```
 
-### 4.5 step05_yum_server.sh
+### 4.6 step06_yum_server.sh
 ```bash
 #!/bin/bash
 # YUM 源服务器配置（基于 installscript/01.yum.sh）
@@ -553,7 +619,7 @@ EOF
 echo "OK: YUM server setup completed"
 ```
 
-### 4.6 step06_yum_client.sh
+### 4.7 step07_yum_client.sh
 ```bash
 #!/bin/bash
 # YUM 源客户端配置（基于 installscript/01.yum_client.sh）
@@ -576,7 +642,7 @@ yum makecache
 echo "OK: YUM client configuration completed"
 ```
 
-### 4.7 step07_container_runtime.sh
+### 4.8 step08_container_runtime.sh
 ```bash
 #!/bin/bash
 # 容器运行时安装（基于 02.docker_install.sh 或 02.contaired_install.sh）
@@ -695,7 +761,7 @@ fi
 echo "OK: Container runtime installation completed"
 ```
 
-### 4.8 step08_registry_install.sh
+### 4.9 step09_registry_install.sh
 ```bash
 #!/bin/bash
 # 私有镜像仓库部署（基于 installscript/03.registry_install.sh）
@@ -704,114 +770,87 @@ local_ip=$(get_local_ip)
 registry_user=$(yaml_get '.global.registry_user' config.yaml)
 registry_pass=$(yaml_get '.global.registry_pass' config.yaml)
 packages_dir=$(yaml_get '.global.packages_dir' config.yaml)
+arch=$(detect_arch)
 
-# 1. 加载 Registry 镜像
-docker load -i "${packages_dir}/04.registry/registry/registry-2.7.1-$(detect_arch).tar"
-
-# 2. 创建 Registry 数据目录
-mkdir -p /data/registry
-
-# 3. 创建认证配置（如果启用）
-if [[ -n "$registry_user" ]]; then
-    mkdir -p /data/registry/auth
-    docker run --rm --entrypoint htpasswd registry:2.7.1 \
-        -Bbn "$registry_user" "$registry_pass" > /data/registry/auth/htpasswd
+# 1. 确保 Docker 已安装并运行
+if ! systemctl is-active docker >/dev/null 2>&1; then
+    echo "ERROR: Docker is not running. Please install container runtime first."
+    exit 1
 fi
 
-# 4. 创建 Registry 配置
-mkdir -p /etc/docker/registry
-cat > /etc/docker/registry/config.yml << EOF
-version: 0.1
-log:
-  fields:
-    service: registry
-storage:
-  cache:
-    blobdescriptor: inmemory
-  filesystem:
-    rootdirectory: /var/lib/registry
-http:
-  addr: :5000
-  headers:
-    X-Content-Type-Options: [nosniff]
-EOF
+# 2. 进入 registry 安装包目录
+cd "${packages_dir}/04.registry/"
 
-# 5. 启动 Registry 服务
-docker run -d \
-    --name registry \
-    --restart=always \
-    -p 5000:5000 \
-    -v /data/registry:/var/lib/registry \
-    -v /etc/docker/registry/config.yml:/etc/docker/registry/config.yml:ro \
-    registry:2.7.1
+# 3. 加载 Registry 镜像
+echo "----正在导入镜像----"
+docker load -i registry-2.7.1-${arch}.tar > /dev/null 2>&1
+docker load -i registry-ui-${arch}.tar > /dev/null 2>&1
 
-# 6. （可选）启动 Registry UI
-if [[ -f "${packages_dir}/04.registry/registry-ui-${arch}.tar" ]]; then
-    docker load -i "${packages_dir}/04.registry/registry-ui-${arch}.tar"
-
-    docker run -d \
-        --name registry-ui \
-        --restart=always \
-        -p 8080:80 \
-        -e REGISTRY_URL=http://$local_ip:5000 \
-        -e DELETE_IMAGES=true \
-        joxit/docker-registry-ui:static
+if docker images | grep registry | wc -l | grep -q "2" ; then
+    echo "【SUCCESS】：registry-2.7.1-${arch}.tar、registry-ui-${arch}.tar镜像导入成功"
+else
+    echo "【ERROR】：registry-2.7.1-${arch}.tar、registry-ui-${arch}.tar镜像导入失败"
+    exit 1
 fi
+
+# 4. 解压镜像数据文件
+echo "----正在解压镜像文件----"
+tar -xzf registry-${arch}.tgz -C /data
+cd /data
+mv registry registry_data
+echo "----镜像文件解压成功----"
+
+# 5. 启动 Registry UI
+cd /data/registry_data
+echo "----正在启动镜像UI----"
+docker run -d --restart=always --name registry-ui-init -p 5080:80 \
+    -e REGISTRY_TITLE=Registry \
+    -e REGISTRY_URL=http://$local_ip:5000 \
+    -e DELETE_IMAGES=true \
+    joxit/docker-registry-ui:2.2.2
+echo "----镜像UI启动成功----"
+
+# 6. 启动 Registry 服务
+echo "----正在启动镜像服务----"
+
+# 检查是否启用认证
+if [[ -n "$registry_user" && "$registry_user" != "" ]]; then
+    echo "镜像仓库用户名为 $registry_user"
+    echo "镜像仓库密码为 $registry_pass"
+
+    set -e
+    V_USER=$registry_user  # 访问镜像仓库的用户名
+    V_PASSWORD=$registry_pass # 访问镜像仓库的密码
+    rm -rf auth
+    mkdir -p auth
+    echo "创建auth路径"
+    echo "创建密钥"
+    htpasswd -bBc `pwd`/auth/htpasswd $V_USER $V_PASSWORD
+    echo "finish htpasswd ......"
+    echo "start:docker run ......"
+    docker run -d --name registry-init \
+        -p 5000:5000 \
+        -v `pwd`/registry:/var/lib/registry \
+        -v `pwd`/config.yml:/etc/docker/registry/config.yml \
+        -v `pwd`/auth:/etc/docker/registry/auth \
+        -e "REGISTRY_AUTH=htpasswd" \
+        -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
+        -e "REGISTRY_AUTH_HTPASSWD_PATH=/etc/docker/registry/auth/htpasswd" \
+        registry:2.7.1
+    echo "finish:docker run ......"
+else
+    # 无认证模式，使用压缩包中的config.yml文件
+    docker run -d --restart=always --name registry-init -p 5000:5000 \
+        -v `pwd`/registry:/var/lib/registry \
+        -v `pwd`/config.yml:/etc/docker/registry/config.yml \
+        registry:2.7.1
+fi
+
+echo "----镜像服务启动成功----"
 
 echo "OK: Registry installation completed"
 ```
 
-### 4.9 step09_k8s_install.sh
-```bash
-#!/bin/bash
-# Kubernetes 组件安装（基于 installscript/04.Dependency-Package-*.sh）
-
-k8s_version=$(yaml_get '.global.kubernetes_version' config.yaml)
-packages_dir=$(yaml_get '.global.packages_dir' config.yaml)
-arch=$(detect_arch)
-
-# 1. 安装 Kubernetes RPM 包
-k8s_rpm_dir="${packages_dir}/01.rpm_package/k8s-${k8s_version}"
-
-if [[ -d "$k8s_rpm_dir" ]]; then
-    rpm -ivh ${k8s_rpm_dir}/*.rpm --force --nodeps
-else
-    echo "ERROR: Kubernetes RPM packages not found"
-    exit 1
-fi
-
-# 2. 安装系统依赖包
-system_rpm_dir="${packages_dir}/01.rpm_package/system"
-if [[ -d "$system_rpm_dir" ]]; then
-    rpm -ivh ${system_rpm_dir}/*.rpm --force --nodeps
-fi
-
-# 3. 替换 kubeadm 二进制（支持 99 年证书）
-if [[ -f "${packages_dir}/01.rpm_package/kubeadm100y-${arch}/kubeadm" ]]; then
-    cp "${packages_dir}/01.rpm_package/kubeadm100y-${arch}/kubeadm" /usr/bin/kubeadm
-    chmod +x /usr/bin/kubeadm
-fi
-
-# 4. 配置 kubelet
-mkdir -p /etc/kubernetes
-cat > /etc/kubernetes/kubelet.env << EOF
-KUBELET_KUBECONFIG_ARGS="--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
-KUBELET_CONFIG_ARGS="--config=/var/lib/kubelet/config.yaml"
-KUBELET_SYSTEM_PODS_ARGS="--pod-manifest-path=/etc/kubernetes/manifests"
-KUBELET_NETWORK_ARGS="--network-plugin=cni --cni-conf-dir=/etc/cni/net.d --cni-bin-dir=/opt/cni/bin"
-KUBELET_DNS_ARGS="--cluster-dns=10.96.0.10 --cluster-domain=cluster.local"
-KUBELET_AUTHZ_ARGS="--authorization-mode=Webhook --client-ca-file=/etc/kubernetes/pki/ca.crt"
-KUBELET_CADVISOR_ARGS="--cadvisor-port=0"
-KUBELET_CGROUP_ARGS="--cgroup-driver=systemd"
-KUBELET_EXTRA_ARGS="--container-runtime=remote --container-runtime-endpoint=unix:///var/run/containerd/containerd.sock"
-EOF
-
-# 5. 启用并启动 kubelet
-systemctl enable kubelet
-systemctl start kubelet || true  # kubelet 会在 join 集群后正常启动
-
-echo "OK: Kubernetes components installation completed"
-```
 
 ### 4.10 step10_cluster_init.sh
 ```bash
@@ -826,26 +865,109 @@ service_subnet=$(yaml_get '.global.service_subnet' config.yaml)
 # 1. 生成 kubeadm 配置文件
 cat > /tmp/kubeadm-config.yaml << EOF
 apiVersion: kubeadm.k8s.io/v1beta3
+bootstrapTokens:
+- groups:
+  - system:bootstrappers:kubeadm:default-node-token
+  token: abcdef.0123456789abcdef
+  ttl: 24h0m0s
+  usages:
+  - signing
+  - authentication
 kind: InitConfiguration
 localAPIEndpoint:
-  advertiseAddress: $local_ip
+  advertiseAddress: "$local_ip"
   bindPort: 6443
 nodeRegistration:
+#  criSocket: /var/run/cri-dockerd.sock
+  imagePullPolicy: IfNotPresent
+  taints: null
+---
+apiServer:
+  timeoutForControlPlane: 4m0s
+apiVersion: kubeadm.k8s.io/v1beta3
+certificatesDir: /etc/kubernetes/pki
+clusterName: kubernetes
+controllerManager: {}
+dns: {}
+etcd:
+  local:
+    dataDir: /data/etcd_data #放在有足够空间的路径下
+imageRepository: registry:5000/google_containers   #指定为前面安装registry的库，ex:1.1.1.1:5000/k8s
+kind: ClusterConfiguration
+kubernetesVersion: v${k8s_version}
+controlPlaneEndpoint: "k8sc1:6443"  #开启该选项，以便后期升级为高可用集群
+networking:
+  dnsDomain: cluster.local
+  podSubnet: 10.42.0.0/16
+  serviceSubnet: 10.96.0.0/12
+scheduler: {}
+
+EOF
+```
+
+
+双栈网络：
+cluster-DualStack.yaml
+
+```bash
+cat > /tmp/kubeadm-config-DualStack.yaml << EOF
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+bootstrapTokens:
+- token: abcdef.0123456789abcdef
+  ttl: 24h0m0s
+  usages:
+  - signing
+  - authentication
+  groups:
+  - system:bootstrappers:kubeadm:default-node-token
+
+localAPIEndpoint:
+  advertiseAddress: "$local_ip"   # 控制平面监听 IPv4 地址
+  bindPort: 6443
+
+nodeRegistration:
+  imagePullPolicy: IfNotPresent
   criSocket: unix:///var/run/containerd/containerd.sock
+  taints: null
+  kubeletExtraArgs:
+    # node-ip 必须是 IPv4 + 可达 IPv6 (不能是 link-local fe80)
+    node-ip: "192.168.62.171,fd00:42::171"
 ---
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
+
 kubernetesVersion: v${k8s_version}
-controlPlaneEndpoint: $local_ip:6443
+clusterName: kubernetes
+certificatesDir: /etc/kubernetes/pki
+
+controlPlaneEndpoint: "k8sc1:6443"   # 高可用入口
+
+imageRepository: registry:5000/google_containers
+
 networking:
-  podSubnet: $pod_network_cidr
-  serviceSubnet: $service_subnet
+  podSubnet: "10.244.0.0/16,fd10:244::/56"       # IPv4 + IPv6 Pod 网络
+  serviceSubnet: "10.96.0.0/16,fd10:96::/112" # IPv4 + IPv6 Service 网络
   dnsDomain: cluster.local
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-cgroupDriver: systemd
+
+apiServer:
+  timeoutForControlPlane: 4m0s
+
+controllerManager:
+  extraArgs:
+    # cluster-cidr: v4,v6（controller-manager 用于节点CIDR分配/校验）
+    cluster-cidr: "10.244.0.0/16,fd10:244::/56"
+    node-cidr-mask-size-ipv4: "24"
+    node-cidr-mask-size-ipv6: "64"
+scheduler: {}
+dns: {}
+etcd:
+  local:
+    dataDir: /data/etcd_data   # 确保有足够空间
 EOF
+```
+
+
 
 # 2. 初始化集群
 kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs
@@ -856,15 +978,8 @@ cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 chown $(id -u):$(id -g) $HOME/.kube/config
 
 # 4. 配置 kube-controller-manager 证书有效期（99年）
-if [[ -f "${packages_dir}/01.rpm_package/kubeadm100y-$(detect_arch)/kubeadm" ]]; then
-    # 替换已运行的控制器
-    cp /usr/bin/kubeadm /tmp/kubeadm-backup
-    cp "${packages_dir}/01.rpm_package/kubeadm100y-$(detect_arch)/kubeadm" /usr/bin/kubeadm
 
-    # 重启控制平面组件
-    docker ps | grep kube-controller-manager | awk '{print $1}' | xargs docker restart
-    docker ps | grep kube-scheduler | awk '{print $1}' | xargs docker restart
-fi
+使用yq，再
 
 # 5. 验证集群状态
 kubectl get nodes
@@ -948,87 +1063,12 @@ echo "OK: Worker nodes joined"
 pod_network_cidr=$(yaml_get '.global.pod_network_cidr' config.yaml)
 
 # 安装 Flannel
-kubectl apply -f - << EOF
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: kube-flannel
-  namespace: kube-flannel
-  labels:
-    app: flannel
-spec:
-  selector:
-    matchLabels:
-      app: flannel
-  template:
-    metadata:
-      labels:
-        app: flannel
-    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: kubernetes.io/os
-                operator: In
-                values:
-                - linux
-      hostNetwork: true
-      priorityClassName: system-node-critical
-      tolerations:
-      - operator: Exists
-        effect: NoSchedule
-      serviceAccountName: flannel
-      containers:
-      - name: kube-flannel
-        image: flannel/flannel:v0.20.2
-        command:
-        - /opt/bin/flanneld
-        args:
-        - --ip-masq
-        - --kube-subnet-mgr
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "50Mi"
-          limits:
-            cpu: "100m"
-            memory: "50Mi"
-        securityContext:
-          privileged: false
-          capabilities:
-            add: ["NET_ADMIN", "NET_RAW"]
-        env:
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: POD_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-        - name: EVENT_QUEUE_DEPTH
-          value: "5000"
-        volumeMounts:
-        - name: run
-          mountPath: /run/flannel
-        - name: flannel-cfg
-          mountPath: /etc/kube-flannel/
-        - name: xtables-lock
-          mountPath: /run/xtables.lock
-      volumes:
-      - name: run
-        hostPath:
-          path: /run/flannel
-      - name: flannel-cfg
-        configMap:
-          name: kube-flannel-cfg
-      - name: xtables-lock
-        hostPath:
-          path: /run/xtables.lock
-          type: FileOrCreate
-EOF
+## ipv4 
+if 
+kubectl apply -f /data/k8s_install/03.setup_file/kube-flannel.yml
+
+## 双栈网络
+kubectl apply -f /data/k8s_install/03.setup_file/kube-DualStack.yml
 
 echo "OK: CNI installation completed"
 ```
@@ -1115,7 +1155,33 @@ else
 fi
 ```
 
-### 5.3 verify03_env.sh
+### 5.3 verify03_dependencies.sh
+```bash
+#!/bin/bash
+# 验证系统依赖安装
+
+# 1. 检查系统工具是否可用
+missing_tools=()
+for tool in wget curl jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        missing_tools+=("$tool")
+    fi
+done
+
+if [[ ${#missing_tools[@]} -gt 0 ]]; then
+    echo "NOT_OK: Missing tools: ${missing_tools[*]}"
+    exit 1
+fi
+
+# 2. 检查 yq 工具（可选）
+if ! command -v yq >/dev/null 2>&1; then
+    echo "WARN: yq not found, using built-in YAML parser"
+fi
+
+echo "OK"
+```
+
+### 5.4 verify04_env.sh
 ```bash
 #!/bin/bash
 # 验证系统环境配置
@@ -1179,7 +1245,7 @@ fi
 echo "OK"
 ```
 
-### 5.4 verify04_dns.sh
+### 5.5 verify05_dns.sh
 ```bash
 #!/bin/bash
 # 验证 DNS 配置
@@ -1193,7 +1259,7 @@ else
 fi
 ```
 
-### 5.5 verify05_yum.sh
+### 5.6 verify06_yum.sh
 ```bash
 #!/bin/bash
 # 验证 YUM 源配置
@@ -1205,7 +1271,7 @@ else
 fi
 ```
 
-### 5.6 verify06_container_runtime.sh
+### 5.7 verify07_container_runtime.sh
 ```bash
 #!/bin/bash
 # 验证容器运行时
@@ -1231,7 +1297,7 @@ else
 fi
 ```
 
-### 5.7 verify07_registry.sh
+### 5.8 verify08_registry.sh
 ```bash
 #!/bin/bash
 # 验证镜像仓库
@@ -1246,7 +1312,7 @@ else
 fi
 ```
 
-### 5.8 verify08_k8s_components.sh
+### 5.9 verify09_k8s_components.sh
 ```bash
 #!/bin/bash
 # 验证 Kubernetes 组件安装
@@ -1278,7 +1344,7 @@ fi
 echo "OK"
 ```
 
-### 5.9 verify09_cluster.sh
+### 5.10 verify10_cluster.sh
 ```bash
 #!/bin/bash
 # 验证集群状态
@@ -1304,7 +1370,7 @@ fi
 echo "OK"
 ```
 
-### 5.10 verify10_admin_conf.sh
+### 5.11 verify11_admin_conf.sh
 ```bash
 #!/bin/bash
 # 验证 kubectl 配置
@@ -1317,7 +1383,7 @@ else
 fi
 ```
 
-### 5.11 verify11_join_controlplane.sh
+### 5.12 verify12_join_controlplane.sh
 ```bash
 #!/bin/bash
 # 验证控制平面节点加入
@@ -1332,7 +1398,7 @@ else
 fi
 ```
 
-### 5.12 verify12_join_worker.sh
+### 5.13 verify13_join_worker.sh
 ```bash
 #!/bin/bash
 # 验证工作节点加入
@@ -1347,7 +1413,7 @@ else
 fi
 ```
 
-### 5.13 verify13_cni.sh
+### 5.14 verify14_cni.sh
 ```bash
 #!/bin/bash
 # 验证 CNI 安装
@@ -1371,7 +1437,7 @@ fi
 echo "OK"
 ```
 
-### 5.14 verify14_nfs.sh
+### 5.15 verify15_nfs.sh
 ```bash
 #!/bin/bash
 # 验证 NFS 配置
@@ -1397,7 +1463,7 @@ else
 fi
 ```
 
-### 5.15 verify15_certificates.sh
+### 5.16 verify16_certificates.sh
 ```bash
 #!/bin/bash
 # 验证证书有效期
@@ -1985,36 +2051,38 @@ k8s_installer/                   # 项目根目录
 ├── steps/                       # 标准化步骤脚本
 │   ├── step01_check_root.sh
 │   ├── step02_ssh_key.sh
-│   ├── step03_env_prepare.sh
-│   ├── step04_dns_config.sh
-│   ├── step05_yum_server.sh
-│   ├── step06_yum_client.sh
-│   ├── step07_container_runtime.sh
-│   ├── step08_registry_install.sh
-│   ├── step09_k8s_install.sh
-│   ├── step10_cluster_init.sh
-│   ├── step11_admin_conf.sh
-│   ├── step12_join_controlplane.sh
-│   ├── step13_join_worker.sh
-│   ├── step14_cni_install.sh
-│   └── step15_nfs_config.sh
+│   ├── step03_install_dependencies.sh
+│   ├── step04_env_prepare.sh
+│   ├── step05_dns_config.sh
+│   ├── step06_yum_server.sh
+│   ├── step07_yum_client.sh
+│   ├── step08_container_runtime.sh
+│   ├── step09_registry_install.sh
+│   ├── step10_k8s_install.sh
+│   ├── step11_cluster_init.sh
+│   ├── step12_admin_conf.sh
+│   ├── step13_join_controlplane.sh
+│   ├── step14_join_worker.sh
+│   ├── step15_cni_install.sh
+│   └── step16_nfs_config.sh
 │
 ├── verify/                      # 验证脚本
 │   ├── verify01_root.sh
 │   ├── verify02_ssh.sh
-│   ├── verify03_env.sh
-│   ├── verify04_dns.sh
-│   ├── verify05_yum.sh
-│   ├── verify06_container_runtime.sh
-│   ├── verify07_registry.sh
-│   ├── verify08_k8s_components.sh
-│   ├── verify09_cluster.sh
-│   ├── verify10_admin_conf.sh
-│   ├── verify11_join_controlplane.sh
-│   ├── verify12_join_worker.sh
-│   ├── verify13_cni.sh
-│   ├── verify14_nfs.sh
-│   └── verify15_certificates.sh
+│   ├── verify03_dependencies.sh
+│   ├── verify04_env.sh
+│   ├── verify05_dns.sh
+│   ├── verify06_yum.sh
+│   ├── verify07_container_runtime.sh
+│   ├── verify08_registry.sh
+│   ├── verify09_k8s_components.sh
+│   ├── verify10_cluster.sh
+│   ├── verify11_admin_conf.sh
+│   ├── verify12_join_controlplane.sh
+│   ├── verify13_join_worker.sh
+│   ├── verify14_cni.sh
+│   ├── verify15_nfs.sh
+│   └── verify16_certificates.sh
 │
 ├── templates/                   # 配置模板
 │   ├── kubeadm-config.yaml.template
