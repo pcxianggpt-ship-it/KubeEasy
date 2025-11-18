@@ -759,6 +759,227 @@ initialize_node_variables() {
     log_info "  总节点数: ${#all_nodes[@]} 个"
 }
 
+# 安装sshpass工具
+install_sshpass() {
+    if command -v sshpass >/dev/null 2>&1; then
+        log_info "sshpass工具已安装"
+        return 0
+    fi
+
+    log_info "开始安装sshpass工具..."
+
+    # 检查包管理器并安装sshpass
+    if command -v yum >/dev/null 2>&1; then
+        # CentOS/RHEL系统
+        yum install -y sshpass >/dev/null 2>&1
+    elif command -v apt >/dev/null 2>&1; then
+        # Ubuntu/Debian系统
+        apt-get update >/dev/null 2>&1
+        apt-get install -y sshpass >/dev/null 2>&1
+    else
+        log_error "无法安装sshpass，请手动安装"
+        return 1
+    fi
+
+    if command -v sshpass >/dev/null 2>&1; then
+        log_success "sshpass工具安装成功"
+        return 0
+    else
+        log_error "sshpass工具安装失败"
+        return 1
+    fi
+}
+
+# 使用sshpass自动分发SSH公钥
+distribute_ssh_key_with_password() {
+    local server_ip="$1"
+    local password="$2"
+    local ssh_key_path="$3"
+
+    log_info "使用密码自动分发SSH公钥到: $server_ip"
+
+    # 创建临时expect脚本
+    local expect_script="/tmp/ssh_key_expect_$$"
+    cat > "$expect_script" << EOF
+#!/usr/bin/expect -f
+
+spawn ssh-copy-id -i "$ssh_key_path" root@$server_ip
+expect {
+    "yes/no" { send "yes\r"; exp_continue }
+    "password:" { send "$password\r"; exp_continue }
+    eof
+}
+EOF
+
+    # 执行expect脚本
+    expect "$expect_script" >/dev/null 2>&1
+    local result=$?
+    rm -f "$expect_script"
+
+    return $result
+}
+
+# 使用sshpass手动复制公钥
+manual_distribute_ssh_key() {
+    local server_ip="$1"
+    local password="$2"
+    local ssh_key_content="$3"
+
+    log_info "手动复制SSH公钥到: $server_ip"
+
+    # 使用sshpass创建.ssh目录和复制公钥
+    sshpass -p "$password" ssh -o StrictHostKeyChecking=no root@"$server_ip" \
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh" >/dev/null 2>&1 || return 1
+
+    sshpass -p "$password" ssh -o StrictHostKeyChecking=no root@"$server_ip" \
+        "echo '$ssh_key_content' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" >/dev/null 2>&1 || return 1
+
+    return 0
+}
+
+# 配置SSH免密登录
+setup_ssh_keyless() {
+    if is_stage_completed "ssh_keyless"; then
+        log_info "SSH免密登录配置已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始配置SSH免密登录"
+    save_stage_status "ssh_keyless" "in_progress" "配置SSH免密登录"
+
+    # 从配置文件读取节点密码
+    local config_file="${CONFIG_FILE:-config.yaml}"
+    local node_password=$(yq eval '.system.node_password // ""' "$config_file" | tr -d '"')
+
+    if [ -z "$node_password" ]; then
+        log_info "未在配置文件中找到节点密码，尝试手动交互方式"
+        node_password=""
+    else
+        log_info "从配置文件读取到节点密码"
+    fi
+
+    # 安装sshpass工具
+    if ! install_sshpass; then
+        log_error "sshpass工具安装失败，无法进行自动密码认证"
+        save_stage_status "ssh_keyless" "failed" "sshpass工具安装失败"
+        return 1
+    fi
+
+    # 检查SSH密钥是否存在，如果不存在则生成
+    if [ ! -f ~/.ssh/id_rsa ]; then
+        log_info "生成SSH密钥对"
+        ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N "" >/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            log_success "SSH密钥对生成成功"
+        else
+            log_error "SSH密钥对生成失败"
+            save_stage_status "ssh_keyless" "failed" "SSH密钥对生成失败"
+            return 1
+        fi
+    else
+        log_info "SSH密钥对已存在"
+    fi
+
+    # 获取SSH公钥内容
+    local ssh_key_content=$(cat ~/.ssh/id_rsa.pub)
+
+    # 配置本地SSH配置
+    cat > ~/.ssh/config << 'EOF'
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile=/dev/null
+    LogLevel=ERROR
+EOF
+    chmod 600 ~/.ssh/config
+
+    # 分发公钥到所有节点
+    log_info "分发SSH公钥到所有节点..."
+    local failed_nodes=()
+
+    for server_ip in "${all_nodes[@]}"; do
+        log_info "配置到节点: $server_ip"
+
+        if [ -n "$node_password" ]; then
+            # 使用密码自动认证
+            if distribute_ssh_key_with_password "$server_ip" "$node_password" "$HOME/.ssh/id_rsa.pub"; then
+                log_success "SSH公钥自动分发成功: $server_ip"
+            else
+                # 尝试手动方式
+                if manual_distribute_ssh_key "$server_ip" "$node_password" "$ssh_key_content"; then
+                    log_success "SSH公钥手动分发成功: $server_ip"
+                else
+                    log_error "SSH公钥分发失败: $server_ip"
+                    failed_nodes+=("$server_ip")
+                    continue
+                fi
+            fi
+        else
+            # 没有密码，尝试免密方式
+            if ssh-copy-id -i ~/.ssh/id_rsa.pub root@"$server_ip" >/dev/null 2>&1; then
+                log_success "SSH公钥分发成功: $server_ip"
+            else
+                log_error "SSH公钥分发失败: $server_ip (需要密码认证)"
+                failed_nodes+=("$server_ip")
+                continue
+            fi
+        fi
+
+        # 测试免密登录
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 root@"$server_ip" "echo 'SSH test successful'" >/dev/null 2>&1; then
+            log_success "SSH免密登录测试成功: $server_ip"
+        else
+            log_error "SSH免密登录测试失败: $server_ip"
+            failed_nodes+=("$server_ip")
+        fi
+    done
+
+    # 配置节点间相互免密登录
+    log_info "配置节点间相互免密登录..."
+
+    # 在每个节点上复制其他节点的公钥
+    for server_ip in "${all_nodes[@]}"; do
+        log_info "在节点 $server_ip 配置其他节点的SSH访问"
+
+        # 将当前节点的公钥分发到其他节点
+        for other_ip in "${all_nodes[@]}"; do
+            if [ "$server_ip" != "$other_ip" ]; then
+                # 获取其他节点的公钥
+                local remote_pubkey=$(ssh root@"$other_ip" "cat ~/.ssh/id_rsa.pub" 2>/dev/null)
+                if [ -n "$remote_pubkey" ]; then
+                    # 添加到当前节点的authorized_keys
+                    ssh_execute "$server_ip" "echo '$remote_pubkey' >> ~/.ssh/authorized_keys" >/dev/null 2>&1
+                fi
+            fi
+        done
+
+        # 确保authorized_keys权限正确
+        ssh_execute "$server_ip" "chmod 600 ~/.ssh/authorized_keys" >/dev/null 2>&1
+    done
+
+    # 测试所有节点的免密登录
+    log_info "测试所有节点间的SSH免密登录..."
+    for server_ip in "${all_nodes[@]}"; do
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 root@"$server_ip" "hostname && date" >/dev/null 2>&1; then
+            log_success "SSH免密登录测试成功: $server_ip"
+        else
+            log_error "SSH免密登录测试失败: $server_ip"
+            failed_nodes+=("$server_ip")
+        fi
+    done
+
+    # 检查结果
+    if [ ${#failed_nodes[@]} -eq 0 ]; then
+        save_stage_status "ssh_keyless" "success" "SSH免密登录配置完成 (${#all_nodes[@]} 个节点)"
+        log_success "所有节点SSH免密登录配置完成"
+        return 0
+    else
+        log_error "部分节点SSH免密登录配置失败: ${#failed_nodes[@]} 个节点"
+        log_error "失败节点: ${failed_nodes[*]}"
+        save_stage_status "ssh_keyless" "failed" "部分节点SSH免密登录配置失败"
+        return 1
+    fi
+}
+
 # 配置主机名和hosts文件 (基于config.yaml)
 configure_hostname_hosts() {
     local config_file="${CONFIG_FILE:-config.yaml}"

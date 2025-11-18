@@ -57,6 +57,9 @@ system:
   # K8s安装文件路径
   data_path: "/data/k8s_install"
 
+  # 节点密码 (用于SSH免密登录配置)
+  node_password: "your_node_password_here"
+
   # 基础配置
   disable_swap: true
   disable_firewall: true
