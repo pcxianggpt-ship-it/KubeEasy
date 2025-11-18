@@ -54,6 +54,9 @@ system:
   # 工作目录
   work_dir: "/data"
 
+  # K8s安装文件路径
+  data_path: "/data/k8s_install"
+
   # 基础配置
   disable_swap: true
   disable_firewall: true

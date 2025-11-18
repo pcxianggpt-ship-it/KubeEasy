@@ -33,7 +33,30 @@ load_config() {
     fi
 
     echo "加载配置文件: $config_file"
-    source "$config_file"
+
+    # 使用yq加载配置变量，如果没有yq则使用默认值
+    if command -v yq >/dev/null 2>&1; then
+        # 加载基本路径配置
+        export data_path=$(yq eval '.system.data_path // "/data/k8s_install"' "$config_file" | tr -d '"')
+        export work_dir=$(yq eval '.system.work_dir // "/data"' "$config_file" | tr -d '"')
+
+        # 加载镜像仓库配置
+        export registry_ip=$(yq eval '.registry.ip' "$config_file" | tr -d '"')
+        export registry_port=$(yq eval '.registry.port' "$config_file" | tr -d '"')
+        export registry_user=$(yq eval '.registry.username' "$config_file" | tr -d '"')
+        export registry_passwd=$(yq eval '.registry.password' "$config_file" | tr -d '"')
+
+        # 加载其他系统配置
+        export dns_ip=$(yq eval '.system.dns_servers[0] // "192.168.62.1"' "$config_file" | tr -d '"')
+
+        log_info "配置加载完成:"
+        log_info "  data_path: $data_path"
+        log_info "  registry_ip: $registry_ip:$registry_port"
+        log_info "  dns_ip: $dns_ip"
+    else
+        log_error "yq工具未安装，无法解析config.yaml，请先安装yq"
+        exit 1
+    fi
 }
 
 #=============================================================================
@@ -431,6 +454,120 @@ execute_on_nodes() {
 }
 
 #=============================================================================
+# 环境检查和工具安装函数
+#=============================================================================
+
+# 检查并安装yq工具
+install_yq() {
+    if command -v yq >/dev/null 2>&1; then
+        log_info "yq工具已安装"
+        return 0
+    fi
+
+    log_info "开始安装yq工具..."
+
+    # 获取系统架构
+    local arch=$(uname -m)
+    local yq_arch=""
+
+    case "$arch" in
+        "x86_64")
+            yq_arch="amd64"
+            ;;
+        "aarch64"|"arm64")
+            yq_arch="arm64"
+            ;;
+        *)
+            log_error "不支持的系统架构: $arch"
+            return 1
+            ;;
+    esac
+
+    # 优先从本地工具目录安装
+    if [ -n "$data_path" ] && [ -f "$data_path/07.tools/yq-${yq_arch}" ]; then
+        log_info "从本地工具目录安装yq"
+        cp "$data_path/07.tools/yq-${yq_arch}" /usr/local/bin/yq
+        chmod +x /usr/local/bin/yq
+
+        # 验证安装
+        if command -v yq >/dev/null 2>&1; then
+            local yq_version=$(yq --version 2>/dev/null | cut -d' ' -f4)
+            log_success "yq工具安装成功 (版本: $yq_version)"
+            return 0
+        else
+            log_error "yq工具安装失败"
+            return 1
+        fi
+    else
+        log_error "找不到本地yq工具文件: $data_path/07.tools/yq-${yq_arch}"
+        log_error "请确保yq工具文件存在或手动安装yq"
+        return 1
+    fi
+}
+
+# 检查系统环境
+check_system_environment() {
+    log_info "开始检查系统环境..."
+
+    local missing_tools=()
+
+    # 检查必需的命令
+    local required_commands=("bash" "ssh" "scp"  "tar")
+
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_tools+=("$cmd")
+        fi
+    done
+
+    # 检查操作系统类型
+    local os_info=""
+    if [ -f /etc/os-release ]; then
+        os_info=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d'"' -f2)
+        log_info "操作系统: $os_info"
+    else
+        log_info "无法检测操作系统信息"
+    fi
+
+    # 检查系统架构
+    local arch=$(uname -m)
+    log_info "系统架构: $arch"
+
+    # 检查root权限
+    if [ "$EUID" -ne 0 ]; then
+        log_error "此脚本需要root权限运行"
+        return 1
+    else
+        log_info "权限检查: 具有root权限"
+    fi
+
+    # 检查是否存在缺失工具
+    if [ ${#missing_tools[@]} -ne 0 ]; then
+        log_error "缺少必需的工具: ${missing_tools[*]}"
+        log_error "请先安装这些工具后再运行脚本"
+        return 1
+    fi
+
+    # 检查并安装yq
+    if ! install_yq; then
+        log_error "yq工具安装失败"
+        return 1
+    fi
+
+    # 检查网络连接
+    log_info "检查网络连接..."
+    if ping -c 1 github.com >/dev/null 2>&1; then
+        log_info "网络连接正常"
+    else
+        log_error "网络连接异常，无法访问github.com"
+        return 1
+    fi
+
+    log_success "系统环境检查通过"
+    return 0
+}
+
+#=============================================================================
 # 具体安装函数 (基于原有逻辑的函数化版本)
 #=============================================================================
 
@@ -571,6 +708,57 @@ generate_hosts_content() {
     echo "$hosts_content"
 }
 
+# 初始化节点变量
+initialize_node_variables() {
+    local config_file="${CONFIG_FILE:-config.yaml}"
+
+    if ! command -v yq >/dev/null 2>&1; then
+        log_error "yq工具未安装，无法初始化节点变量"
+        return 1
+    fi
+
+    log_info "初始化节点变量..."
+
+    # 初始化数组变量
+    master_ips=()
+    worker_ips=()
+    registry_ips=()
+    k8s_nodes=()
+    all_nodes=()
+
+    # 读取控制节点IP
+    local master_count=$(yq eval '.servers.master | length' "$config_file")
+    for ((i=0; i<master_count; i++)); do
+        master_ips+=($(yq eval ".servers.master[$i].ip" "$config_file"))
+        k8s_nodes+=($(yq eval ".servers.master[$i].ip" "$config_file"))
+        all_nodes+=($(yq eval ".servers.master[$i].ip" "$config_file"))
+    done
+
+    # 读取工作节点IP
+    local worker_count=$(yq eval '.servers.workers | length' "$config_file")
+    for ((i=0; i<worker_count; i++)); do
+        worker_ips+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
+        k8s_nodes+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
+        all_nodes+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
+    done
+
+    # 读取镜像仓库节点IP
+    local registry_count=$(yq eval '.servers.registry | length' "$config_file")
+    for ((i=0; i<registry_count; i++)); do
+        registry_ips+=($(yq eval ".servers.registry[$i].ip" "$config_file"))
+        all_nodes+=($(yq eval ".servers.registry[$i].ip" "$config_file"))
+    done
+
+    # 导出数组变量供其他函数使用
+    export master_ips worker_ips registry_ips k8s_nodes all_nodes
+
+    log_info "节点变量初始化完成:"
+    log_info "  控制节点: ${#master_ips[@]} 个"
+    log_info "  工作节点: ${#worker_ips[@]} 个"
+    log_info "  镜像仓库节点: ${#registry_ips[@]} 个"
+    log_info "  总节点数: ${#all_nodes[@]} 个"
+}
+
 # 配置主机名和hosts文件 (基于config.yaml)
 configure_hostname_hosts() {
     local config_file="${CONFIG_FILE:-config.yaml}"
@@ -578,15 +766,65 @@ configure_hostname_hosts() {
     log_info "开始配置主机名和hosts文件 (基于配置: $config_file)"
     save_stage_status "hostname_hosts" "in_progress" "配置主机名和hosts"
 
-    # 检查配置文件是否存在
+    # 检查配置文件和yq工具
     if [ ! -f "$config_file" ]; then
         log_error "配置文件不存在: $config_file"
         save_stage_status "hostname_hosts" "failed" "配置文件不存在"
         return 1
     fi
 
+    if ! command -v yq >/dev/null 2>&1; then
+        log_error "yq工具未安装，请先安装yq"
+        save_stage_status "hostname_hosts" "failed" "yq工具未安装"
+        return 1
+    fi
+
+    # 使用yq直接读取配置信息并生成hosts文件内容
+    log_info "使用yq解析配置文件..."
+
     # 生成hosts文件内容
-    local hosts_content=$(generate_hosts_content "$config_file")
+    local hosts_content="127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+"
+
+    # 读取控制节点信息并添加到hosts文件
+    local master_count=$(yq eval '.servers.master | length' "$config_file")
+    for ((i=0; i<master_count; i++)); do
+        local ip=$(yq eval ".servers.master[$i].ip" "$config_file")
+        local hostname=$(yq eval ".servers.master[$i].hostname" "$config_file" | tr -d '"')
+        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+            log_error "控制节点 $ip 缺少hostname配置，请检查config.yaml"
+            continue
+        fi
+        hosts_content+="$ip   $hostname
+"
+    done
+
+    # 读取工作节点信息并添加到hosts文件
+    local worker_count=$(yq eval '.servers.workers | length' "$config_file")
+    for ((i=0; i<worker_count; i++)); do
+        local ip=$(yq eval ".servers.workers[$i].ip" "$config_file")
+        local hostname=$(yq eval ".servers.workers[$i].hostname" "$config_file" | tr -d '"')
+        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+            log_error "工作节点 $ip 缺少hostname配置，请检查config.yaml"
+            continue
+        fi
+        hosts_content+="$ip   $hostname
+"
+    done
+
+    # 读取镜像仓库节点信息并添加到hosts文件
+    local registry_count=$(yq eval '.servers.registry | length' "$config_file")
+    for ((i=0; i<registry_count; i++)); do
+        local ip=$(yq eval ".servers.registry[$i].ip" "$config_file")
+        local hostname=$(yq eval ".servers.registry[$i].hostname" "$config_file" | tr -d '"')
+        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+            log_error "镜像仓库节点 $ip 缺少hostname配置，请检查config.yaml"
+            continue
+        fi
+        hosts_content+="$ip   $hostname
+"
+    done
 
     # 创建临时hosts文件
     local temp_hosts_file="/tmp/kubeeasy_hosts_$$"
@@ -597,26 +835,26 @@ configure_hostname_hosts() {
     cat "$temp_hosts_file"
     echo "================================"
 
-    # 解析服务器列表
-    local master_result=$(parse_server_list "$config_file" "master")
-    local master_ips=($(echo "$master_result" | cut -d'|' -f1))
-    local master_hostnames=($(echo "$master_result" | cut -d'|' -f2))
+    # 统计节点数量
+    local total_nodes=$((master_count + worker_count + registry_count))
+    log_info "发现服务器总数: $total_nodes"
+    log_info "控制节点: $master_count 个"
+    log_info "工作节点: $worker_count 个"
+    log_info "镜像仓库节点: $registry_count 个"
 
-    local worker_result=$(parse_server_list "$config_file" "workers")
-    local worker_ips=($(echo "$worker_result" | cut -d'|' -f1))
-    local worker_hostnames=($(echo "$worker_result" | cut -d'|' -f2))
+    # 合并所有节点IP用于分发hosts文件
+    local all_ips=()
 
-    local registry_result=$(parse_server_list "$config_file" "registry")
-    local registry_ips=($(echo "$registry_result" | cut -d'|' -f1))
-    local registry_hostnames=($(echo "$registry_result" | cut -d'|' -f2))
-
-    # 合并所有服务器IP
-    local all_ips=("${master_ips[@]}" "${worker_ips[@]}" "${registry_ips[@]}")
-
-    log_info "发现服务器总数: ${#all_ips[@]}"
-    log_info "控制节点: ${#master_ips[@]} 个"
-    log_info "工作节点: ${#worker_ips[@]} 个"
-    log_info "镜像仓库节点: ${#registry_ips[@]} 个"
+    # 收集所有节点IP
+    for ((i=0; i<master_count; i++)); do
+        all_ips+=($(yq eval ".servers.master[$i].ip" "$config_file"))
+    done
+    for ((i=0; i<worker_count; i++)); do
+        all_ips+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
+    done
+    for ((i=0; i<registry_count; i++)); do
+        all_ips+=($(yq eval ".servers.registry[$i].ip" "$config_file"))
+    done
 
     # 分发hosts文件到所有节点
     log_info "分发hosts文件到所有节点..."
@@ -632,12 +870,14 @@ configure_hostname_hosts() {
 
     # 配置控制节点主机名
     log_info "配置控制节点主机名..."
-    for ((i=0; i<${#master_ips[@]}; i++)); do
-        local server_ip="${master_ips[$i]}"
-        local hostname="${master_hostnames[$i]}"
+    for ((i=0; i<master_count; i++)); do
+        local server_ip=$(yq eval ".servers.master[$i].ip" "$config_file")
+        local hostname=$(yq eval ".servers.master[$i].hostname" "$config_file" | tr -d '"')
 
-        if [ -z "$hostname" ]; then
-            hostname="k8sc$((i+1))"
+        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+            log_error "跳过控制节点 $server_ip：缺少hostname配置"
+            failed_hosts+=("$server_ip")
+            continue
         fi
 
         log_info "配置控制节点: $server_ip -> $hostname"
@@ -651,12 +891,14 @@ configure_hostname_hosts() {
 
     # 配置工作节点主机名
     log_info "配置工作节点主机名..."
-    for ((i=0; i<${#worker_ips[@]}; i++)); do
-        local server_ip="${worker_ips[$i]}"
-        local hostname="${worker_hostnames[$i]}"
+    for ((i=0; i<worker_count; i++)); do
+        local server_ip=$(yq eval ".servers.workers[$i].ip" "$config_file")
+        local hostname=$(yq eval ".servers.workers[$i].hostname" "$config_file" | tr -d '"')
 
-        if [ -z "$hostname" ]; then
-            hostname="k8sw$((i+1))"
+        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+            log_error "跳过工作节点 $server_ip：缺少hostname配置"
+            failed_hosts+=("$server_ip")
+            continue
         fi
 
         log_info "配置工作节点: $server_ip -> $hostname"
@@ -670,12 +912,14 @@ configure_hostname_hosts() {
 
     # 配置镜像仓库节点主机名
     log_info "配置镜像仓库节点主机名..."
-    for ((i=0; i<${#registry_ips[@]}; i++)); do
-        local server_ip="${registry_ips[$i]}"
-        local hostname="${registry_hostnames[$i]}"
+    for ((i=0; i<registry_count; i++)); do
+        local server_ip=$(yq eval ".servers.registry[$i].ip" "$config_file")
+        local hostname=$(yq eval ".servers.registry[$i].hostname" "$config_file" | tr -d '"')
 
-        if [ -z "$hostname" ]; then
-            hostname="registry"
+        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+            log_error "跳过镜像仓库节点 $server_ip：缺少hostname配置"
+            failed_hosts+=("$server_ip")
+            continue
         fi
 
         log_info "配置镜像仓库节点: $server_ip -> $hostname"
@@ -692,7 +936,7 @@ configure_hostname_hosts() {
 
     # 检查结果
     if [ ${#failed_hosts[@]} -eq 0 ]; then
-        save_stage_status "hostname_hosts" "success" "主机名和hosts配置完成 (${#all_ips[@]} 个节点)"
+        save_stage_status "hostname_hosts" "success" "主机名和hosts配置完成 ($total_nodes 个节点)"
         log_success "所有节点主机名和hosts配置完成"
         return 0
     else
@@ -715,7 +959,7 @@ configure_environment() {
 
     # 并发配置所有节点的环境变量
     if ssh_execute_script_batch "${k8s_nodes[@]}" \
-        "/data/k8s_install/06.InstallScrpit/01.set-env.sh" \
+        "$data_path/06.InstallScrpit/01.set-env.sh" \
         "$data_path" "配置环境变量" true; then
 
         save_stage_status "environment" "success" "环境变量配置完成"
@@ -738,7 +982,7 @@ configure_dns() {
 
     # 并发配置所有节点的DNS
     if ssh_execute_script_batch "${k8s_nodes[@]}" \
-        "/data/k8s_install/06.InstallScrpit/01.dns.sh" \
+        "$data_path/06.InstallScrpit/01.dns.sh" \
         "$dns_ip" "配置DNS" true; then
 
         save_stage_status "dns" "success" "DNS配置完成"
@@ -767,17 +1011,17 @@ install_docker() {
 
     # 解压Docker安装包
     log_info "解压Docker安装包"
-    tar -xzf /data/k8s_install/02.install_package/docker-20.10.24.tgz -C /data/k8s_install/02.install_package/
+    tar -xzf "$data_path/02.install_package/docker-20.10.24.tgz" -C "$data_path/02.install_package/"
     exit_status_check "Docker安装包解压" || return 1
 
     # 分发Docker二进制文件
-    distribute_file "/data/k8s_install/02.install_package/docker" "/usr/bin" "${all_nodes[@]}"
+    distribute_file "$data_path/02.install_package/docker" "/usr/bin" "${all_nodes[@]}"
 
     # 串行配置Docker服务 (避免并发可能导致的问题)
     for server_ip in "${all_nodes[@]}"; do
         if ! check_docker_installed "$server_ip"; then
             log_info "在节点 $server_ip 配置Docker服务"
-            if ssh_execute_script "$server_ip" "/data/k8s_install/06.InstallScrpit/02.docker_install.sh" "$registry_ip" "配置Docker"; then
+            if ssh_execute_script "$server_ip" "$data_path/06.InstallScrpit/02.docker_install.sh" "$registry_ip" "配置Docker"; then
                 if check_docker_installed "$server_ip"; then
                     log_success "Docker在节点 $server_ip 安装成功"
                 else
@@ -860,11 +1104,11 @@ install_k8s_dependencies() {
     save_stage_status "dependencies" "in_progress" "安装K8s依赖包"
 
     # 分发依赖包
-    distribute_file "/data/k8s_install/01.rpm_package/kubelet" "/tmp" "${k8s_nodes[@]}"
+    distribute_file "$data_path/01.rpm_package/kubelet" "/tmp" "${k8s_nodes[@]}"
 
     # 并发安装依赖包
     if ssh_execute_script_batch "${k8s_nodes[@]}" \
-        "/data/k8s_install/06.InstallScrpit/04.Dependency-Package-rpm.sh" \
+        "$data_path/06.InstallScrpit/04.Dependency-Package-rpm.sh" \
         "" "安装K8s依赖包" true; then
 
         save_stage_status "dependencies" "success" "K8s依赖包安装完成"
@@ -886,8 +1130,18 @@ main() {
     log_info "开始 KubeEasy Kubernetes 集群安装"
     log_info "配置文件: $config_file"
 
+    # 环境检查
+    log_info "第一步: 环境检查和工具安装"
+    if ! check_system_environment; then
+        log_error "环境检查失败，脚本退出"
+        exit 1
+    fi
+
     # 加载配置
     load_config "$config_file"
+
+    # 初始化节点变量
+    initialize_node_variables
 
     # 验证配置
     validate_config
