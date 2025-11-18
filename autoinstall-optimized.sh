@@ -999,7 +999,7 @@ check_docker_installed() {
     check_remote_command "$server" "docker info | wc -l" "53"
 }
 
-# 安装Docker
+# 安装Docker (for K8s v1.23.17)
 install_docker() {
     if is_stage_completed "docker"; then
         log_info "Docker安装已完成，跳过"
@@ -1041,6 +1041,82 @@ install_docker() {
 
     save_stage_status "docker" "success" "Docker安装完成"
     return 0
+}
+
+# 检查Containerd是否已安装
+check_containerd_installed() {
+    local server="$1"
+    ssh_execute "$server" "containerd --version" >/dev/null 2>&1
+}
+
+# 安装Containerd (for K8s v1.30.14)
+install_containerd() {
+    if is_stage_completed "containerd"; then
+        log_info "Containerd安装已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始安装Containerd"
+    save_stage_status "containerd" "in_progress" "安装Containerd"
+
+    # 解压Containerd安装包
+    log_info "解压Containerd安装包"
+    tar -xzf "$data_path/02.install_package/containerd-1.7.18-linux-amd64.tar.gz" -C /usr/local/
+    exit_status_check "Containerd安装包解压" || return 1
+
+    # 分发Containerd二进制文件到所有节点
+    log_info "分发Containerd二进制文件到所有节点"
+    for server_ip in "${all_nodes[@]}"; do
+        if ! check_containerd_installed "$server_ip"; then
+            # 复制containerd二进制文件
+            scp -r /usr/local/bin/containerd* root@$server_ip:/usr/local/bin/
+            scp -r /usr/local/sbin/runc root@$server_ip:/usr/local/sbin/
+            scp -r /usr/local/bin/ctr root@$server_ip:/usr/local/bin/
+
+            log_info "在节点 $server_ip 配置Containerd服务"
+            if ssh_execute_script "$server_ip" "$data_path/06.InstallScrpit/02.containerd_install.sh" "$registry_ip" "配置Containerd"; then
+                if check_containerd_installed "$server_ip"; then
+                    log_success "Containerd在节点 $server_ip 安装成功"
+                else
+                    log_error "Containerd在节点 $server_ip 安装失败"
+                    save_stage_status "containerd" "failed" "Containerd安装失败: $server_ip"
+                    return 1
+                fi
+            else
+                log_error "Containerd配置失败: $server_ip"
+                save_stage_status "containerd" "failed" "Containerd配置失败: $server_ip"
+                return 1
+            fi
+        else
+            log_info "Containerd已在节点 $server_ip 安装"
+        fi
+    done
+
+    save_stage_status "containerd" "success" "Containerd安装完成"
+    return 0
+}
+
+# 容器运行时安装函数 (根据K8s版本选择)
+install_container_runtime() {
+    # 从config.yaml读取K8s版本
+    local k8s_version=$(yq eval '.cluster.version' "${CONFIG_FILE:-config.yaml}" | tr -d '"')
+    log_info "检测到Kubernetes版本: $k8s_version"
+
+    case "$k8s_version" in
+        "v1.23.17")
+            log_info "为K8s v1.23.17安装Docker作为容器运行时"
+            install_docker
+            ;;
+        "v1.30.14")
+            log_info "为K8s v1.30.14安装Containerd作为容器运行时"
+            install_containerd
+            ;;
+        *)
+            log_error "不支持的Kubernetes版本: $k8s_version"
+            log_error "支持的版本: v1.23.17 (Docker), v1.30.14 (Containerd)"
+            return 1
+            ;;
+    esac
 }
 
 # 拉取K8s基础镜像
@@ -1155,7 +1231,7 @@ main() {
         "setup_ssh_keyless"
         "configure_environment"
         "configure_dns"
-        "install_docker"
+        "install_container_runtime"
         "install_registry"
         "install_k8s_dependencies"
         "pull_k8s_images"
