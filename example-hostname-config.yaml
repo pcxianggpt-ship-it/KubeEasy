@@ -1,0 +1,54 @@
+# KubeEasy 主机名配置示例
+# 展示不同的主机名配置方式
+
+# 方式1：完整自定义主机名
+servers:
+  architecture: "amd64"
+
+  master:
+    - ip: "192.168.1.10"
+      hostname: "master-01"     # 完全自定义
+    - ip: "192.168.1.11"
+      hostname: "master-02"     # 完全自定义
+
+  workers:
+    - ip: "192.168.1.20"
+      hostname: "worker-node-1" # 完全自定义
+    - ip: "192.168.1.21"
+      hostname: "worker-node-2" # 完全自定义
+
+# 方式2：部分自定义 + 自动生成
+#servers:
+#  architecture: "amd64"
+#
+#  master:
+#    - ip: "192.168.1.10"
+#      hostname: "k8s-master"   # 第一个自定义
+#    - ip: "192.168.1.11"        # 第二个不设置，自动生成 k8sc2
+#    - ip: "192.168.1.12"        # 第三个不设置，自动生成 k8sc3
+#
+#  workers:
+#    - ip: "192.168.1.20"
+#      hostname: "k8s-worker"   # 第一个自定义
+#    - ip: "192.168.1.21"        # 后续自动生成 k8sw2, k8sw3...
+
+# 方式3：完全自动生成
+#servers:
+#  architecture: "amd64"
+#
+#  master:
+#    - ip: "192.168.1.10"        # 自动生成：k8sc1
+#    - ip: "192.168.1.11"        # 自动生成：k8sc2
+#
+#  workers:
+#    - ip: "192.168.1.20"        # 自动生成：k8sw1
+#    - ip: "192.168.1.21"        # 自动生成：k8sw2
+
+# 其他配置保持不变
+cluster:
+  name: "kubernetes"
+  version: "v1.23.17"
+
+system:
+  work_dir: "/data"
+  dns_servers: ["192.168.1.1"]

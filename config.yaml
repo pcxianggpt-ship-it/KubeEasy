@@ -1,0 +1,199 @@
+# KubeEasy Kubernetes 集群配置文件
+# 支持版本: v1.23.17 或 v1.30.14
+
+#=============================================================================
+# 集群基本信息
+#=============================================================================
+cluster:
+  name: "kubernetes"
+  version: "v1.23.17"  # 选择 "v1.23.17" 或 "v1.30.14"
+  network:
+    pod_subnet: "10.42.0.0/16"
+    service_subnet: "10.96.0.0/12"
+    dns_domain: "cluster.local"
+
+#=============================================================================
+# 服务器配置
+#=============================================================================
+servers:
+  # 集群架构配置：amd64 或 arm64（所有机器架构必须一致）
+  architecture: "amd64"
+
+  # 控制平面节点
+  master:
+    - ip: "192.168.62.171"
+      hostname: "k8sc1"    # 可选：不设置则自动生成 k8sc1, k8sc2, k8sc3...
+    - ip: "192.168.62.172"
+      hostname: "k8sc2"    # 自定义主机名
+    - ip: "192.168.62.173"
+      hostname: "k8sc3"    # 自定义主机名
+
+  # 工作节点
+  workers:
+    - ip: "192.168.62.174"
+      hostname: "k8sw1"    # 自定义主机名
+    - ip: "192.168.62.175"
+      hostname: "k8sw2"    # 自定义主机名
+    - ip: "192.168.62.176"
+      hostname: "k8sw3"    # 自定义主机名
+    - ip: "192.168.62.188"
+      hostname: "k8sw4"    # 自定义主机名
+
+  # 独立镜像仓库节点 (可选)
+  registry:
+    - ip: "192.168.63.184"
+      hostname: "registry"  # 自定义主机名，默认为 "registry"
+
+#=============================================================================
+# 系统配置
+#=============================================================================
+system:
+  # DNS服务器
+  dns_servers: ["192.168.62.1"]
+
+  # 工作目录
+  work_dir: "/data"
+
+  # 基础配置
+  disable_swap: true
+  disable_firewall: true
+
+  # 并发配置
+  parallel_jobs: 0  # 0表示无限制并发，其他数字表示最大并发数
+
+#=============================================================================
+# 容器运行时配置 (根据K8s版本自动选择)
+#=============================================================================
+container_runtime:
+  # Docker配置 (v1.23.17默认)
+  docker:
+    version: "20.10.24"
+    data_root: "/data/docker_root"
+    log_max_size: "500m"
+    log_max_file: "3"
+    insecure_registries: ["registry:5000"]
+
+  # Containerd配置 (v1.30.14默认)
+  containerd:
+    version: "1.7.18"
+    config_path: "/etc/containerd/config.toml"
+    data_root: "/data/containerd_root"
+    snapshotter: "overlay2"
+
+#=============================================================================
+# 镜像仓库配置
+#=============================================================================
+registry:
+  enable: true
+  ip: "192.168.63.184"
+  port: "5000"
+  auth: true
+  username: "amarsoft"
+  password: "amarsoft@123"
+  ui_port: "5080"
+
+#=============================================================================
+# 存储配置
+#=============================================================================
+storage:
+  # NFS存储配置
+  nfs:
+    enable: true
+    server_ip: "192.168.62.174"
+    path: "/data/nfs_root"
+
+  # 存储类配置
+  storage_class: "nfs-client"
+
+#=============================================================================
+# 网络配置
+#=============================================================================
+network:
+  # CNI插件
+  cni: "flannel"
+  flannel:
+    version: "v0.22.0"
+    pod_cidr: "10.42.0.0/16"
+    backend_type: "vxlan"
+
+  # Ingress控制器
+  ingress:
+    enable: true
+    controller: "traefik"
+    version: "v2.10"
+
+#=============================================================================
+# K8s组件版本配置
+#=============================================================================
+kubernetes:
+  # 组件版本会根据选择的K8s版本自动匹配
+  components:
+    # v1.23.17 组件版本
+    v1.23.17:
+      kubeadm: "1.23.17-0"
+      kubelet: "1.23.17-0"
+      kubectl: "1.23.17-0"
+      cni: "0.8.7-0"
+      cri_tools: "1.23.0-0"
+      pause: "3.6"
+      core_dns: "v1.8.6"
+      etcd: "3.5.0-0"
+
+    # v1.30.14 组件版本
+    v1.30.14:
+      kubeadm: "1.30.14-0"
+      kubelet: "1.30.14-0"
+      kubectl: "1.30.14-0"
+      cni: "1.5.1-0"
+      cri_tools: "1.30.0-0"
+      pause: "3.9"
+      core_dns: "v1.11.1"
+      etcd: "3.5.13-0"
+
+#=============================================================================
+# 部署选项
+#=============================================================================
+deployment:
+  # 重装选项
+  force_reinstall: false
+  skip_existing: true
+  backup_before_install: true
+
+  # 日志配置
+  log_level: "INFO"
+  log_file: "logs/install.log"
+
+  # 状态配置
+  status_dir: "status"
+
+  # 证书配置
+  cert_duration: "87600h"  # 10年
+
+#=============================================================================
+# 附加组件配置
+#=============================================================================
+addons:
+  # 监控组件
+  monitoring:
+    enable: false
+    prometheus: true
+    grafana: true
+    alertmanager: true
+
+  # 日志组件
+  logging:
+    enable: false
+    elasticsearch: false
+    loki: false
+    skywalking: false
+
+  # 存储组件
+  storage:
+    enable: true
+    nfs_provisioner: true
+    redis_ha: true
+
+  # 其他组件
+  others:
+    metrics_server: true
+    dashboard: false
