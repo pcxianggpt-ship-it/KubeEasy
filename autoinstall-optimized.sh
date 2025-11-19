@@ -484,9 +484,9 @@ install_yq() {
     esac
 
     # 优先从本地工具目录安装
-    if [ -n "$data_path" ] && [ -f "$data_path/07.tools/yq-${yq_arch}" ]; then
+    if [ -f "tools/yq_linux_${yq_arch}" ]; then
         log_info "从本地工具目录安装yq"
-        cp "$data_path/07.tools/yq-${yq_arch}" /usr/local/bin/yq
+        cp "tools/yq_linux_${yq_arch}" /usr/local/bin/yq
         chmod +x /usr/local/bin/yq
 
         # 验证安装
@@ -499,7 +499,7 @@ install_yq() {
             return 1
         fi
     else
-        log_error "找不到本地yq工具文件: $data_path/07.tools/yq-${yq_arch}"
+        log_error "找不到本地yq工具文件: tools/yq_linux_${yq_arch}"
         log_error "请确保yq工具文件存在或手动安装yq"
         return 1
     fi
