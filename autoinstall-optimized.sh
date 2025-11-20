@@ -1447,45 +1447,45 @@ main() {
     initialize_hosts_file
 
     # 执行安装步骤
-    log_info "第二步: 配置主机名和hosts文件"
-    if ! configure_hostname_hosts; then
-        log_error "安装失败在步骤: 配置主机名和hosts文件"
-        exit 1
-    fi
-
-    log_info "第三步: 配置SSH免密登录"
+    log_info "第二步: 配置SSH免密登录"
     if ! setup_ssh_keyless; then
         log_error "安装失败在步骤: 配置SSH免密登录"
         exit 1
     fi
 
-    log_info "第四步: 配置环境变量"
+    log_info "第三步: 安装K8s依赖包"
+    if ! install_k8s_dependencies; then
+        log_error "安装失败在步骤: 安装K8s依赖包"
+        exit 1
+    fi
+
+    log_info "第四步: 配置主机名和hosts文件"
+    if ! configure_hostname_hosts; then
+        log_error "安装失败在步骤: 配置主机名和hosts文件"
+        exit 1
+    fi
+
+    log_info "第五步: 配置环境变量"
     if ! configure_environment; then
         log_error "安装失败在步骤: 配置环境变量"
         exit 1
     fi
 
-    log_info "第五步: 配置DNS服务"
+    log_info "第六步: 配置DNS服务"
     if ! configure_dns; then
         log_error "安装失败在步骤: 配置DNS服务"
         exit 1
     fi
 
-    log_info "第六步: 安装容器运行时"
+    log_info "第七步: 安装容器运行时"
     if ! install_container_runtime; then
         log_error "安装失败在步骤: 安装容器运行时"
         exit 1
     fi
 
-    log_info "第七步: 安装镜像仓库"
+    log_info "第八步: 安装镜像仓库"
     if ! install_registry; then
         log_error "安装失败在步骤: 安装镜像仓库"
-        exit 1
-    fi
-
-    log_info "第八步: 安装K8s依赖包"
-    if ! install_k8s_dependencies; then
-        log_error "安装失败在步骤: 安装K8s依赖包"
         exit 1
     fi
 
