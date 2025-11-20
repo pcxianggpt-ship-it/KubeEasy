@@ -1217,7 +1217,7 @@ configure_dns() {
 # 检查Docker是否已安装
 check_docker_installed() {
     local server="$1"
-    check_remote_command "$server" "docker info | wc -l" "53"
+    check_remote_command "$server" "docker info | grep "Server Version" | awk '{print $NF}'" "20.10.24"
 }
 
 # 安装Docker (for K8s v1.23.17)
