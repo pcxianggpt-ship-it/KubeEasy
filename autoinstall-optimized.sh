@@ -1447,36 +1447,89 @@ main() {
     initialize_hosts_file
 
     # 执行安装步骤
-    local install_steps=(
-        "configure_hostname_hosts"
-        "setup_ssh_keyless"
-        "configure_environment"
-        "configure_dns"
-        "install_container_runtime"
-        "install_registry"
-        "install_k8s_dependencies"
-        "pull_k8s_images"
-        "init_cluster"
-        "join_master_nodes"
-        "join_worker_nodes"
-        "configure_network"
-        "configure_storage"
-        "install_addons"
-    )
+    log_info "第二步: 配置主机名和hosts文件"
+    if ! configure_hostname_hosts; then
+        log_error "安装失败在步骤: 配置主机名和hosts文件"
+        exit 1
+    fi
 
-    local current_step=1
-    local total_steps=${#install_steps[@]}
+    log_info "第三步: 配置SSH免密登录"
+    if ! setup_ssh_keyless; then
+        log_error "安装失败在步骤: 配置SSH免密登录"
+        exit 1
+    fi
 
-    for step in "${install_steps[@]}"; do
-        log_info "[$current_step/$total_steps] 执行步骤: $step"
+    log_info "第四步: 配置环境变量"
+    if ! configure_environment; then
+        log_error "安装失败在步骤: 配置环境变量"
+        exit 1
+    fi
 
-        if ! $step; then
-            log_error "安装失败在步骤: $step"
-            exit 1
-        fi
+    log_info "第五步: 配置DNS服务"
+    if ! configure_dns; then
+        log_error "安装失败在步骤: 配置DNS服务"
+        exit 1
+    fi
 
-        current_step=$((current_step + 1))
-    done
+    log_info "第六步: 安装容器运行时"
+    if ! install_container_runtime; then
+        log_error "安装失败在步骤: 安装容器运行时"
+        exit 1
+    fi
+
+    log_info "第七步: 安装镜像仓库"
+    if ! install_registry; then
+        log_error "安装失败在步骤: 安装镜像仓库"
+        exit 1
+    fi
+
+    log_info "第八步: 安装K8s依赖包"
+    if ! install_k8s_dependencies; then
+        log_error "安装失败在步骤: 安装K8s依赖包"
+        exit 1
+    fi
+
+    log_info "第九步: 拉取K8s基础镜像"
+    if ! pull_k8s_images; then
+        log_error "安装失败在步骤: 拉取K8s基础镜像"
+        exit 1
+    fi
+
+    log_info "第十步: 初始化集群"
+    if ! init_cluster; then
+        log_error "安装失败在步骤: 初始化集群"
+        exit 1
+    fi
+
+    log_info "第十一步: 加入主控节点"
+    if ! join_master_nodes; then
+        log_error "安装失败在步骤: 加入主控节点"
+        exit 1
+    fi
+
+    log_info "第十二步: 加入工作节点"
+    if ! join_worker_nodes; then
+        log_error "安装失败在步骤: 加入工作节点"
+        exit 1
+    fi
+
+    log_info "第十三步: 配置网络组件"
+    if ! configure_network; then
+        log_error "安装失败在步骤: 配置网络组件"
+        exit 1
+    fi
+
+    log_info "第十四步: 配置存储组件"
+    if ! configure_storage; then
+        log_error "安装失败在步骤: 配置存储组件"
+        exit 1
+    fi
+
+    log_info "第十五步: 安装集群插件"
+    if ! install_addons; then
+        log_error "安装失败在步骤: 安装集群插件"
+        exit 1
+    fi
 
     log_success "KubeEasy Kubernetes 集群安装完成!"
 }
