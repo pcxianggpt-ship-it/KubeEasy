@@ -1477,15 +1477,14 @@ main() {
         exit 1
     fi
 
-    log_info "第七步: 安装容器运行时"
-    if ! install_container_runtime; then
-        log_error "安装失败在步骤: 安装容器运行时"
-        exit 1
-    fi
-
-    log_info "第八步: 安装镜像仓库"
+    log_info "第七步: 安装镜像仓库"
     if ! install_registry; then
         log_error "安装失败在步骤: 安装镜像仓库"
+        exit 1
+    fi
+    log_info "第八步: 安装容器运行时"
+    if ! install_container_runtime; then
+        log_error "安装失败在步骤: 安装容器运行时"
         exit 1
     fi
 
