@@ -753,8 +753,9 @@ initialize_node_variables() {
     export master_ips worker_ips registry_ips k8s_nodes all_nodes
 
     log_info "节点变量初始化完成:"
-    log_info "  控制节点: ${#master_ips[@]} 个"
-    log_info "  工作节点: ${#worker_ips[@]} 个"
+    log_info "  控制节点(master_ips): ${#master_ips[@]} 个"
+    log_info "  工作节点(worker_ips): ${#worker_ips[@]} 个"
+    log_info "  K8S节点(k8s_nodes): ${#k8s_nodes[@]} 个"
     log_info "  镜像仓库节点: ${#registry_ips[@]} 个"
     log_info "  总节点数: ${#all_nodes[@]} 个"
 }
