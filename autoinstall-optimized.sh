@@ -160,10 +160,11 @@ ssh_execute_check() {
 
 # 批量SSH执行函数 (支持并发)
 ssh_execute_batch() {
-    local servers=("$@")
     local command="$1"
     local description="$2"
     local use_parallel=${3:-false}
+    shift 3
+    local servers=("$@")
 
     if [ "$use_parallel" = "true" ]; then
         ssh_execute_parallel "${servers[@]}" "$command" "$description"
@@ -174,11 +175,10 @@ ssh_execute_batch() {
 
 # 串行执行SSH命令
 ssh_execute_sequential() {
-    local servers=("$@")
     local command="$1"
     local description="$2"
     shift 2
-    servers=("$@")
+    local servers=("$@")
 
     local failed_count=0
 
@@ -201,11 +201,10 @@ ssh_execute_sequential() {
 
 # 并发执行SSH命令
 ssh_execute_parallel() {
-    local servers=("$@")
     local command="$1"
     local description="$2"
     shift 2
-    servers=("$@")
+    local servers=("$@")
 
     local pids=()
     local temp_files=()
@@ -284,13 +283,12 @@ ssh_execute_script() {
 
 # 批量执行远程脚本 (高频使用模式)
 ssh_execute_script_batch() {
-    local servers=("$@")
     local script_path="$1"
     local args="$2"
     local description="${3:-执行脚本}"
     local use_parallel=${4:-false}
     shift 4
-    servers=("$@")
+    local servers=("$@")
 
     if [ "$use_parallel" = "true" ]; then
         local pids=()
@@ -1205,9 +1203,10 @@ configure_environment() {
     save_stage_status "environment" "in_progress" "配置环境变量"
 
     # 并发配置所有节点的环境变量
-    if ssh_execute_script_batch "${k8s_nodes[@]}" \
+    if ssh_execute_script_batch \
         "$data_path/06.InstallScrpit/01.set-env.sh" \
-        "$data_path" "配置环境变量" true; then
+        "$data_path" "配置环境变量" true \
+        "${k8s_nodes[@]}"; then
 
         save_stage_status "environment" "success" "环境变量配置完成"
         return 0
@@ -1228,9 +1227,10 @@ configure_dns() {
     save_stage_status "dns" "in_progress" "配置DNS"
 
     # 并发配置所有节点的DNS
-    if ssh_execute_script_batch "${k8s_nodes[@]}" \
+    if ssh_execute_script_batch \
         "$data_path/06.InstallScrpit/01.dns.sh" \
-        "$dns_ip" "配置DNS" true; then
+        "$dns_ip" "配置DNS" true \
+        "${k8s_nodes[@]}"; then
 
         save_stage_status "dns" "success" "DNS配置完成"
         return 0
@@ -1431,9 +1431,10 @@ install_k8s_dependencies() {
     distribute_file "$data_path/01.rpm_package/kubelet" "/tmp" "${k8s_nodes[@]}"
 
     # 并发安装依赖包
-    if ssh_execute_script_batch "${k8s_nodes[@]}" \
+    if ssh_execute_script_batch \
         "$data_path/06.InstallScrpit/04.Dependency-Package-rpm.sh" \
-        "" "安装K8s依赖包" true; then
+        "" "安装K8s依赖包" true \
+        "${k8s_nodes[@]}"; then
 
         save_stage_status "dependencies" "success" "K8s依赖包安装完成"
         return 0
