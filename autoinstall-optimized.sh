@@ -330,24 +330,49 @@ ssh_execute_script_batch() {
     fi
 }
 
-# 文件分发函数
+# 文件或文件夹分发函数
 distribute_file() {
-    local local_file="$1"
+    local local_path="$1"
     local remote_path="$2"
     local servers=("${@:3}")
 
-    if [ ! -f "$local_file" ]; then
-        log_error "本地文件不存在: $local_file"
+    # 检查本地路径是否存在
+    if [ ! -e "$local_path" ]; then
+        log_error "本地路径不存在: $local_path"
         return 1
     fi
 
-    log_info "分发文件 $local_file 到 ${#servers[@]} 个节点"
+    # 检测是文件还是目录
+    if [ -f "$local_path" ]; then
+        log_info "分发文件 $local_path 到 ${#servers[@]} 个节点"
+        local item_type="文件"
+        local scp_option=""
+    elif [ -d "$local_path" ]; then
+        log_info "分发目录 $local_path 到 ${#servers[@]} 个节点"
+        local item_type="目录"
+        local scp_option="-r"
+    else
+        log_error "不支持的路径类型: $local_path"
+        return 1
+    fi
 
     for server in "${servers[@]}"; do
-        if scp "$local_file" "root@$server:$remote_path"; then
-            log_success "文件分发成功: $local_file -> $server:$remote_path"
+        # 对于目录，需要确保远程路径存在
+        if [ "$item_type" = "目录" ]; then
+            # 创建远程目录（如果不存在）
+            ssh_execute "$server" "mkdir -p $remote_path" >/dev/null 2>&1
+            # 获取本地目录名
+            local dir_name=$(basename "$local_path")
+            local full_remote_path="$remote_path/$dir_name"
         else
-            log_error "文件分发失败: $local_file -> $server:$remote_path"
+            local full_remote_path="$remote_path"
+        fi
+
+        # 使用scp分发，目录使用-r参数
+        if scp $scp_option "$local_path" "root@$server:$full_remote_path"; then
+            log_success "$item_type分发成功: $local_path -> $server:$full_remote_path"
+        else
+            log_error "$item_type分发失败: $local_path -> $server:$full_remote_path"
             return 1
         fi
     done
@@ -1288,13 +1313,14 @@ install_containerd() {
 
     # 分发Containerd二进制文件到所有节点
     log_info "分发Containerd二进制文件到所有节点"
+
+    # 使用distribute_file函数分发containerd相关目录
+    distribute_file "/usr/local/bin/containerd*" "/usr/local/bin" "${all_nodes[@]}"
+    distribute_file "/usr/local/sbin/runc" "/usr/local/sbin" "${all_nodes[@]}"
+    distribute_file "/usr/local/bin/ctr" "/usr/local/bin" "${all_nodes[@]}"
+
     for server_ip in "${all_nodes[@]}"; do
         if ! check_containerd_installed "$server_ip"; then
-            # 复制containerd二进制文件
-            scp -r /usr/local/bin/containerd* root@$server_ip:/usr/local/bin/
-            scp -r /usr/local/sbin/runc root@$server_ip:/usr/local/sbin/
-            scp -r /usr/local/bin/ctr root@$server_ip:/usr/local/bin/
-
             log_info "在节点 $server_ip 配置Containerd服务"
             if ssh_execute_script "$server_ip" "$data_path/06.InstallScrpit/02.containerd_install.sh" "$registry_ip" "配置Containerd"; then
                 if check_containerd_installed "$server_ip"; then
