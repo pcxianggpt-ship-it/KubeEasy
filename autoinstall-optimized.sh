@@ -1518,7 +1518,13 @@ install_k8s_dependencies() {
     log_info "目标Kubernetes版本: $k8s_version"
 
     # 分发依赖包
-    distribute_file "$data_path/01.rpm_package/$k8s_version" "/tmp/k8s/rpm" "${k8s_nodes[@]}"
+    log_info "分发K8s依赖包到所有节点..."
+    if ! distribute_file "$data_path/01.rpm_package/$k8s_version" "/tmp/k8s/rpm" "${k8s_nodes[@]}"; then
+        log_error "K8s依赖包分发失败，脚本退出"
+        save_stage_status "dependencies" "failed" "依赖包分发失败"
+        exit 1
+    fi
+    log_success "K8s依赖包分发完成"
 
     # 并发安装依赖包
     if ssh_execute_script_batch \
