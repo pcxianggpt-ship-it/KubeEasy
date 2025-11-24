@@ -577,15 +577,6 @@ check_system_environment() {
         return 1
     fi
 
-    # 检查网络连接
-    log_info "检查网络连接..."
-    if ping -c 1 github.com >/dev/null 2>&1; then
-        log_info "网络连接正常"
-    else
-        log_error "网络连接异常，无法访问github.com"
-        return 1
-    fi
-
     log_success "系统环境检查通过"
     return 0
 }
@@ -1204,7 +1195,7 @@ configure_environment() {
 
     # 并发配置所有节点的环境变量
     if ssh_execute_script_batch \
-        "$data_path/06.InstallScrpit/01.set-env.sh" \
+        "installscript/01.set-env.sh" \
         "$data_path" "配置环境变量" true \
         "${k8s_nodes[@]}"; then
 
@@ -1228,7 +1219,7 @@ configure_dns() {
 
     # 并发配置所有节点的DNS
     if ssh_execute_script_batch \
-        "$data_path/06.InstallScrpit/01.dns.sh" \
+        "installscript/01.dns.sh" \
         "$dns_ip" "配置DNS" true \
         "${k8s_nodes[@]}"; then
 
@@ -1268,7 +1259,7 @@ install_docker() {
     for server_ip in "${all_nodes[@]}"; do
         if ! check_docker_installed "$server_ip"; then
             log_info "在节点 $server_ip 配置Docker服务"
-            if ssh_execute_script "$server_ip" "$data_path/06.InstallScrpit/02.docker_install.sh" "$registry_ip" "配置Docker"; then
+            if ssh_execute_script "$server_ip" "installscript/02.docker_install.sh" "$registry_ip" "配置Docker"; then
                 if check_docker_installed "$server_ip"; then
                     log_success "Docker在节点 $server_ip 安装成功"
                 else
@@ -1322,7 +1313,7 @@ install_containerd() {
     for server_ip in "${all_nodes[@]}"; do
         if ! check_containerd_installed "$server_ip"; then
             log_info "在节点 $server_ip 配置Containerd服务"
-            if ssh_execute_script "$server_ip" "$data_path/06.InstallScrpit/02.containerd_install.sh" "$registry_ip" "配置Containerd"; then
+            if ssh_execute_script "$server_ip" "installscript/02.containerd_install.sh" "$registry_ip" "配置Containerd"; then
                 if check_containerd_installed "$server_ip"; then
                     log_success "Containerd在节点 $server_ip 安装成功"
                 else
@@ -1417,6 +1408,101 @@ pull_k8s_images() {
     log_success "K8s基础镜像拉取完成"
 }
 
+# 验证K8s依赖包版本
+verify_k8s_dependency_versions() {
+    local server="$1"
+    local k8s_version="$2"
+    local validation_failed=false
+
+    log_info "验证节点 $server 的K8s依赖包版本"
+
+    # 根据K8s版本确定期望的依赖包版本
+    local expected_kubelet_version=""
+    local expected_kubeadm_version=""
+    local expected_kubectl_version=""
+
+    case "$k8s_version" in
+        "v1.23.17")
+            expected_kubelet_version="1.23.17"
+            expected_kubeadm_version="1.23.17"
+            expected_kubectl_version="1.23.17"
+            ;;
+        "v1.30.14")
+            expected_kubelet_version="1.30.14"
+            expected_kubeadm_version="1.30.14"
+            expected_kubectl_version="1.30.14"
+            ;;
+        *)
+            log_error "不支持的Kubernetes版本: $k8s_version"
+            return 1
+            ;;
+    esac
+
+    # 验证kubelet版本
+    local kubelet_version=$(ssh_execute "$server" "kubelet --version 2>/dev/null | awk '{print \$2}'" true)
+    if [ -n "$kubelet_version" ]; then
+        if echo "$kubelet_version" | grep -q "$expected_kubelet_version"; then
+            log_success "节点 $server kubelet版本正确: $kubelet_version"
+        else
+            log_error "节点 $server kubelet版本不匹配: 期望 $expected_kubelet_version, 实际 $kubelet_version"
+            validation_failed=true
+        fi
+    else
+        log_error "节点 $server kubelet未安装或无法获取版本信息"
+        validation_failed=true
+    fi
+
+    # 验证kubeadm版本
+    local kubeadm_version=$(ssh_execute "$server" "kubeadm version 2>/dev/null | grep 'GitVersion' | awk -F'\"' '{print \$2}'" true)
+    if [ -n "$kubeadm_version" ]; then
+        if echo "$kubeadm_version" | grep -q "$expected_kubeadm_version"; then
+            log_success "节点 $server kubeadm版本正确: $kubeadm_version"
+        else
+            log_error "节点 $server kubeadm版本不匹配: 期望 v$expected_kubeadm_version, 实际 $kubeadm_version"
+            validation_failed=true
+        fi
+    else
+        log_error "节点 $server kubeadm未安装或无法获取版本信息"
+        validation_failed=true
+    fi
+
+    # 验证kubectl版本
+    local kubectl_version=$(ssh_execute "$server" "kubectl version --client 2>/dev/null | grep 'GitVersion' | awk -F'\"' '{print \$2}'" true)
+    if [ -n "$kubectl_version" ]; then
+        if echo "$kubectl_version" | grep -q "$expected_kubectl_version"; then
+            log_success "节点 $server kubectl版本正确: $kubectl_version"
+        else
+            log_error "节点 $server kubectl版本不匹配: 期望 v$expected_kubectl_version, 实际 $kubectl_version"
+            validation_failed=true
+        fi
+    else
+        log_error "节点 $server kubectl未安装或无法获取版本信息"
+        validation_failed=true
+    fi
+
+    # 验证kubernetes-cni版本
+    local cni_version=$(ssh_execute "$server" "rpm -q kubernetes-cni 2>/dev/null | awk -F'-' '{print \$2}'" true)
+    if [ -n "$cni_version" ]; then
+        # 对于CNI版本，我们检查是否是兼容版本
+        if echo "$cni_version" | grep -E "^(0\.8\.|1\.)" >/dev/null; then
+            log_success "节点 $server kubernetes-cni版本兼容: $cni_version"
+        else
+            log_error "节点 $server kubernetes-cni版本可能不兼容: $cni_version"
+            validation_failed=true
+        fi
+    else
+        log_error "节点 $server kubernetes-cni未安装"
+        validation_failed=true
+    fi
+
+    # 返回验证结果
+    if [ "$validation_failed" = "true" ]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
 # 安装K8s依赖包
 install_k8s_dependencies() {
     if is_stage_completed "dependencies"; then
@@ -1427,20 +1513,44 @@ install_k8s_dependencies() {
     log_info "开始安装K8s依赖包"
     save_stage_status "dependencies" "in_progress" "安装K8s依赖包"
 
+    # 获取目标K8s版本
+    local k8s_version=$(yq eval '.cluster.version' "${CONFIG_FILE:-config.yaml}" | tr -d '"')
+    log_info "目标Kubernetes版本: $k8s_version"
+
     # 分发依赖包
-    distribute_file "$data_path/01.rpm_package/kubelet" "/tmp" "${k8s_nodes[@]}"
+    distribute_file "$data_path/01.rpm_package/$k8s_version" "/tmp/k8s/rpm" "${k8s_nodes[@]}"
 
     # 并发安装依赖包
     if ssh_execute_script_batch \
-        "$data_path/06.InstallScrpit/04.Dependency-Package-rpm.sh" \
+        "installscript/04.Dependency-Package-rpm.sh" \
         "" "安装K8s依赖包" true \
         "${k8s_nodes[@]}"; then
 
-        save_stage_status "dependencies" "success" "K8s依赖包安装完成"
-        return 0
+        log_info "依赖包安装完成，开始验证版本..."
+
+        # 验证所有节点的依赖包版本
+        local failed_nodes=()
+        for server_ip in "${k8s_nodes[@]}"; do
+            if ! verify_k8s_dependency_versions "$server_ip" "$k8s_version"; then
+                log_error "节点 $server_ip 依赖包版本验证失败"
+                failed_nodes+=("$server_ip")
+            fi
+        done
+
+        # 检查验证结果
+        if [ ${#failed_nodes[@]} -eq 0 ]; then
+            save_stage_status "dependencies" "success" "K8s依赖包安装和版本验证完成"
+            log_success "所有节点K8s依赖包版本验证通过"
+            return 0
+        else
+            log_error "以下节点依赖包版本验证失败: ${failed_nodes[*]}"
+            log_error "请检查依赖包版本是否与K8s版本 $k8s_version 匹配"
+            save_stage_status "dependencies" "failed" "依赖包版本验证失败"
+            exit 1
+        fi
     else
         save_stage_status "dependencies" "failed" "K8s依赖包安装失败"
-        return 1
+        exit 1
     fi
 }
 

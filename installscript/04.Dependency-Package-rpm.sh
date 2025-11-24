@@ -33,7 +33,7 @@
 # fi
 
 
-cd /tmp/kubelet
+cd /tmp/k8s/rpm
 rpm -ivh *.rpm
 
 
