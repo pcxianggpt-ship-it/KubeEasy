@@ -49,10 +49,18 @@ load_config() {
         # 加载其他系统配置
         export dns_ip=$(yq eval '.system.dns_servers[0] // "192.168.62.1"' "$config_file" | tr -d '"')
 
+        # 加载K8s集群配置
+        export k8s_version=$(yq eval '.cluster.version' "$config_file" | tr -d '"')
+        export k8s_pod_subnet=$(yq eval '.network.pod_subnet // "10.244.0.0/16"' "$config_file" | tr -d '"')
+        export k8s_service_subnet=$(yq eval '.network.service_subnet // "10.96.0.0/12"' "$config_file" | tr -d '"')
+
         log_info "配置加载完成:"
         log_info "  data_path: $data_path"
         log_info "  registry_ip: $registry_ip:$registry_port"
         log_info "  dns_ip: $dns_ip"
+        log_info "  k8s_version: $k8s_version"
+        log_info "  pod_subnet: $k8s_pod_subnet"
+        log_info "  service_subnet: $k8s_service_subnet"
     else
         log_error "yq工具未安装，无法解析config.yaml，请先安装yq"
         exit 1
