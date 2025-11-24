@@ -32,8 +32,8 @@
 # 	exit 1
 # fi
 
-echo "path = /tmp/k8s/rpm/$k8s_version"
-cd /tmp/k8s/rpm/$k8s_version
+set -x
+cd /tmp/k8s/rpm/$1
 rpm -ivh *.rpm
 
 

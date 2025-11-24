@@ -1537,7 +1537,7 @@ install_k8s_dependencies() {
     # 并发安装依赖包
     if ssh_execute_script_batch \
         "installscript/04.Dependency-Package-rpm.sh" \
-        "" "安装K8s依赖包" true \
+        "$k8s_version" "安装K8s依赖包" true \
         "${k8s_nodes[@]}"; then
 
         log_info "依赖包安装完成，开始验证版本..."
