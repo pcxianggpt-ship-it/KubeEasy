@@ -90,6 +90,12 @@ log_success() {
     echo "[$timestamp] [SUCCESS] $message" | tee -a "$LOG_FILE"
 }
 
+log_debug() {
+    local message="$1"
+    local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [DEBUG] $message" | tee -a "$LOG_FILE"
+}
+
 # 阶段状态检查和记录
 exit_status_check() {
     local operation="$1"
