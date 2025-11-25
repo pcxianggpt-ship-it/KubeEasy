@@ -5,7 +5,7 @@ check_and_install_system_packages() {
 
     os_info=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d'"' -f2 | awk '{print $1}')
 
-    local os_path="/tmp/k8s/system/$os_info"
+    local os_path="/tmp/k8s/rpm/system/$os_info"
 
     if [ ! -d "$os_path" ]; then
         echo "【WARN】: Kylinos RPM 目录不存在: $os_path"
@@ -24,7 +24,11 @@ check_and_install_system_packages() {
 
     echo "找到 ${#os_rpms[@]} 个 Kylinos RPM 包"
 
-    # Check each RPM and install if not already installed
+    # Collect RPM packages that need to be installed
+    local packages_to_install=()
+    local packages_to_check=()
+
+    # Check each RPM and collect those that need installation
     for rpm_file in "${os_rpms[@]}"; do
         local package_name=$(rpm -qp "$rpm_file" --queryformat "%{NAME}" 2>/dev/null)
 
@@ -37,15 +41,35 @@ check_and_install_system_packages() {
         if rpm -qa | grep -q "^${package_name}-"; then
             echo "【SUCCESS】: ${package_name} 已安装"
         else
-            echo "正在安装 Kylinos RPM 包: $(basename "$rpm_file")"
-            if rpm -ivh "$rpm_file" > /dev/null 2>&1; then
-                echo "【SUCCESS】: ${package_name} 安装成功"
-            else
-                echo "【ERROR】: ${package_name} 安装失败"
-                return 1
-            fi
+            echo "【INFO】: ${package_name} 需要安装"
+            packages_to_install+=("$rpm_file")
+            packages_to_check+=("$package_name")
         fi
     done
+
+    # Install all required RPM packages at once
+    if [ ${#packages_to_install[@]} -gt 0 ]; then
+        echo "发现 ${packages_to_install[@]} 个需要安装的 RPM 包:"
+        echo "开始统一安装..."
+        cd "$os_path"
+        if rpm -ivh "${packages_to_install[@]}" > /dev/null 2>&1; then
+            echo "【SUCCESS】: 批量安装 RPM 包成功"
+            # Verify installation
+            for package_name in "${packages_to_check[@]}"; do
+                if rpm -qa | grep -q "^${package_name}-"; then
+                    echo "【SUCCESS】: ${package_name} 安装验证成功"
+                else
+                    echo "【ERROR】: ${package_name} 安装验证失败"
+                    return 1
+                fi
+            done
+        else
+            echo "【ERROR】: 批量安装 RPM 包失败"
+            return 1
+        fi
+    else
+        echo "【INFO】: 所有 Kylinos RPM 包都已安装"
+    fi
 
     echo "【SUCCESS】: 所有 Kylinos RPM 包检查/安装完成"
     return 0
@@ -82,7 +106,7 @@ verify_service_enabled() {
     fi
 }
 
-
+echo "正在安装kubernetes $1 依赖" 
 cd /tmp/k8s/rpm/$1
 rpm -ivh *.rpm
 
