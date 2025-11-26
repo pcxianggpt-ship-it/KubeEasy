@@ -1585,6 +1585,94 @@ install_k8s_dependencies() {
 }
 
 #=============================================================================
+# YUM源配置函数
+#=============================================================================
+
+# 配置本地YUM源
+configure_local_yum_source() {
+    if is_stage_completed "local_yum_source"; then
+        log_info "本地YUM源配置已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始配置本地YUM源"
+    save_stage_status "local_yum_source" "in_progress" "配置本地YUM源"
+
+    # 检查是否已存在YUM源
+    local has_yum_source=false
+    local failed_nodes=()
+
+    log_info "检查各节点YUM源状态..."
+    for server_ip in "${all_nodes[@]}"; do
+        if check_file_exists "$server_ip" "/etc/yum.repos.d/CentOS-Base.repo" || check_file_exists "$server_ip" "/etc/yum.repos.d/Kylin-Server.repo"; then
+            log_info "节点 $server_ip 已有YUM源配置"
+            has_yum_source=true
+        else
+            log_info "节点 $server_ip 缺少YUM源配置"
+        fi
+    done
+
+    if [ "$has_yum_source" = "true" ]; then
+        log_info "检测到部分节点已有YUM源，但仍需确保所有节点都有配置"
+    fi
+
+    # 分发本地YUM源文件
+    local repo_files=("06.repo")
+    for repo_file in "${repo_files[@]}"; do
+        if [ ! -f "installscript/$repo_file" ]; then
+            log_error "YUM源文件不存在: installscript/$repo_file"
+            save_stage_status "local_yum_source" "failed" "YUM源文件不存在"
+            return 1
+        fi
+
+        log_info "分发YUM源文件: $repo_file"
+        if ! distribute_file "installscript/$repo_file" "/etc/yum.repos.d/" "${all_nodes[@]}"; then
+            log_error "YUM源文件分发失败: $repo_file"
+            save_stage_status "local_yum_source" "failed" "YUM源文件分发失败"
+            return 1
+        fi
+    done
+
+    # 备份现有YUM源文件（如果存在）
+    log_info "备份现有YUM源文件..."
+    for server_ip in "${all_nodes[@]}"; do
+        ssh_execute "$server_ip" "mkdir -p /etc/yum.repos.d/backup && \
+            find /etc/yum.repos.d/ -name '*.repo' -not -path '*/backup/*' -not -name '06.repo' -exec mv {} /etc/yum.repos.d/backup/ \;" >/dev/null 2>&1
+    done
+
+    # 更新YUM缓存
+    log_info "更新所有节点的YUM缓存"
+    if ssh_execute_batch "yum clean all && yum makecache" "更新YUM缓存" true "${all_nodes[@]}"; then
+        log_success "YUM缓存更新成功"
+    else
+        log_error "YUM缓存更新失败"
+        save_stage_status "local_yum_source" "failed" "YUM缓存更新失败"
+        return 1
+    fi
+
+    # 验证YUM源是否可用
+    log_info "验证YUM源可用性..."
+    for server_ip in "${all_nodes[@]}"; do
+        if ! ssh_execute "$server_ip" "yum repolist | grep -q 'KubeEasy'"; then
+            log_error "节点 $server_ip YUM源验证失败"
+            failed_nodes+=("$server_ip")
+        else
+            log_success "节点 $server_ip YUM源验证成功"
+        fi
+    done
+
+    if [ ${#failed_nodes[@]} -eq 0 ]; then
+        save_stage_status "local_yum_source" "success" "本地YUM源配置完成"
+        log_success "本地YUM源配置完成"
+        return 0
+    else
+        log_error "部分节点YUM源配置失败: ${failed_nodes[*]}"
+        save_stage_status "local_yum_source" "failed" "YUM源验证失败"
+        return 1
+    fi
+}
+
+#=============================================================================
 # 主安装流程
 #=============================================================================
 
@@ -1607,6 +1695,13 @@ main() {
 
     # 初始化节点变量
     initialize_node_variables
+
+    # 配置本地YUM源
+    log_info "检查和配置本地YUM源"
+    if ! configure_local_yum_source; then
+        log_error "安装失败在步骤: 配置本地YUM源"
+        exit 1
+    fi
 
     # 验证配置
     validate_config

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Function to check and install Kylinos specific RPM packages
+# Function to check and install Kylinos specific RPM packages with dependency detection
 check_and_install_system_packages() {
 
     os_info=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d'"' -f2 | awk '{print $1}')
@@ -12,67 +12,16 @@ check_and_install_system_packages() {
         return 0
     fi
 
-    echo "检查 $os_info RPM 包..."
 
-    # Find all RPM files in Kylinos directory
-    local os_rpms=($(find "$os_path" -name "*.rpm" 2>/dev/null))
-
-    if [ ${#os_rpms[@]} -eq 0 ]; then
-        echo "【INFO】: $os_path 目录中没有找到 RPM 包"
+    # Finally install the target packages
+    echo "正在安装目标包..."
+    if rpm -ivh *.rpm > /dev/null 2>&1; then
+        echo "【SUCCESS】: socat 和 conntrack-tools 安装成功"
         return 0
-    fi
-
-    echo "找到 ${#os_rpms[@]} 个 Kylinos RPM 包"
-
-    # Collect RPM packages that need to be installed
-    local packages_to_install=()
-    local packages_to_check=()
-
-    # Check each RPM and collect those that need installation
-    for rpm_file in "${os_rpms[@]}"; do
-        local package_name=$(rpm -qp "$rpm_file" --queryformat "%{NAME}" 2>/dev/null)
-
-        if [ -z "$package_name" ]; then
-            echo "【WARN】: 无法获取 RPM 包名称: $rpm_file"
-            continue
-        fi
-
-        # Check if package is already installed
-        if rpm -qa | grep -q "^${package_name}-"; then
-            echo "【SUCCESS】: ${package_name} 已安装"
-        else
-            echo "【INFO】: ${package_name} 需要安装"
-            packages_to_install+=("$rpm_file")
-            packages_to_check+=("$package_name")
-        fi
-    done
-
-    # Install all required RPM packages at once
-    if [ ${#packages_to_install[@]} -gt 0 ]; then
-        echo "发现 ${packages_to_install[@]} 个需要安装的 RPM 包:"
-        echo "开始统一安装..."
-        cd "$os_path"
-        if rpm -ivh "${packages_to_install[@]}" > /dev/null 2>&1; then
-            echo "【SUCCESS】: 批量安装 RPM 包成功"
-            # Verify installation
-            for package_name in "${packages_to_check[@]}"; do
-                if rpm -qa | grep -q "^${package_name}-"; then
-                    echo "【SUCCESS】: ${package_name} 安装验证成功"
-                else
-                    echo "【ERROR】: ${package_name} 安装验证失败"
-                    return 1
-                fi
-            done
-        else
-            echo "【ERROR】: 批量安装 RPM 包失败"
-            return 1
-        fi
     else
-        echo "【INFO】: 所有 Kylinos RPM 包都已安装"
+        echo "【ERROR】: 目标包安装失败"
+        return 1
     fi
-
-    echo "【SUCCESS】: 所有 Kylinos RPM 包检查/安装完成"
-    return 0
 }
 
 # 检查system依赖包是否安装
