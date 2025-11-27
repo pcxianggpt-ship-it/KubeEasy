@@ -1598,72 +1598,105 @@ configure_local_yum_source() {
     log_info "开始配置本地YUM源"
     save_stage_status "local_yum_source" "in_progress" "配置本地YUM源"
 
-    # 检查是否已存在YUM源
-    local has_yum_source=false
-    local failed_nodes=()
+    # 1. 验证YUM源是否存在
+    log_info "步骤1: 验证YUM源存在性"
+    local yum_available=false
 
-    log_info "检查各节点YUM源状态..."
-    for server_ip in "${all_nodes[@]}"; do
-        if check_file_exists "$server_ip" "/etc/yum.repos.d/CentOS-Base.repo" || check_file_exists "$server_ip" "/etc/yum.repos.d/Kylin-Server.repo"; then
-            log_info "节点 $server_ip 已有YUM源配置"
-            has_yum_source=true
+    # 检查任意一个节点的YUM源可用性
+    if [ ${#all_nodes[@]} -gt 0 ]; then
+        local test_node="${all_nodes[0]}"
+        if ssh_execute_check "$test_node" "yum clean all >/dev/null 2>&1 && yum repolist >/dev/null 2>&1" "YUM源可用性测试"; then
+            log_success "YUM源已可用，跳过配置"
+            save_stage_status "local_yum_source" "success" "YUM源已可用"
+            return 0
         else
-            log_info "节点 $server_ip 缺少YUM源配置"
+            log_info "YUM源不可用，开始配置"
         fi
-    done
-
-    if [ "$has_yum_source" = "true" ]; then
-        log_info "检测到部分节点已有YUM源，但仍需确保所有节点都有配置"
-    fi
-
-    # 分发本地YUM源文件
-    local repo_files=("06.repo")
-    for repo_file in "${repo_files[@]}"; do
-        if [ ! -f "installscript/$repo_file" ]; then
-            log_error "YUM源文件不存在: installscript/$repo_file"
-            save_stage_status "local_yum_source" "failed" "YUM源文件不存在"
-            return 1
-        fi
-
-        log_info "分发YUM源文件: $repo_file"
-        if ! distribute_file "installscript/$repo_file" "/etc/yum.repos.d/" "${all_nodes[@]}"; then
-            log_error "YUM源文件分发失败: $repo_file"
-            save_stage_status "local_yum_source" "failed" "YUM源文件分发失败"
-            return 1
-        fi
-    done
-
-    # 备份现有YUM源文件（如果存在）
-    log_info "备份现有YUM源文件..."
-    for server_ip in "${all_nodes[@]}"; do
-        ssh_execute "$server_ip" "mkdir -p /etc/yum.repos.d/backup && \
-            find /etc/yum.repos.d/ -name '*.repo' -not -path '*/backup/*' -not -name '06.repo' -exec mv {} /etc/yum.repos.d/backup/ \;" >/dev/null 2>&1
-    done
-
-    # 更新YUM缓存
-    log_info "更新所有节点的YUM缓存"
-    if ssh_execute_batch "yum clean all && yum makecache" "更新YUM缓存" true "${all_nodes[@]}"; then
-        log_success "YUM缓存更新成功"
     else
-        log_error "YUM缓存更新失败"
-        save_stage_status "local_yum_source" "failed" "YUM缓存更新失败"
+        log_error "节点列表为空，无法验证YUM源"
+        save_stage_status "local_yum_source" "failed" "节点列表为空"
         return 1
     fi
 
-    # 验证YUM源是否可用
-    log_info "验证YUM源可用性..."
+    # 2. 根据config.yaml获取registry地址
+    log_info "步骤2: 获取镜像仓库地址"
+    if [ ${#registry_ips[@]} -eq 0 ]; then
+        log_error "镜像仓库地址列表为空，请检查config.yaml配置"
+        save_stage_status "local_yum_source" "failed" "镜像仓库地址为空"
+        return 1
+    fi
+
+    local registry_server="${registry_ips[0]}"
+    log_info "使用镜像仓库服务器: $registry_server"
+
+    # 3. 分发ISO文件到镜像仓库服务器
+    log_info "步骤3: 分发ISO文件到镜像仓库服务器"
+    local iso_file="Kylin-Server-V10-SP3-General-Release-2212-X86_64.iso"
+    local local_iso_path="$data_path/06.repo"
+    local remote_iso_path="/data/06.repo"
+
+    if [ ! -f "$local_iso_path" ]; then
+        log_error "ISO文件不存在: $local_iso_path"
+        save_stage_status "local_yum_source" "failed" "ISO文件不存在"
+        return 1
+    fi
+
+    log_info "分发ISO文件: $local_iso_path -> $registry_server:$remote_iso_path"
+    if distribute_file "$local_iso_path" "/data/" "$registry_server"; then
+        log_success "ISO文件分发成功"
+    else
+        log_error "ISO文件分发失败"
+        save_stage_status "local_yum_source" "failed" "ISO文件分发失败"
+        return 1
+    fi
+
+    # 4. 在镜像仓库服务器执行01.yum.sh脚本
+    log_info "步骤4: 在镜像仓库服务器配置YUM源"
+
+    # 检查01.yum.sh脚本是否存在
+    local yum_script="installscript/01.yum.sh"
+    if [ ! -f "$yum_script" ]; then
+        log_error "YUM配置脚本不存在: $yum_script"
+        save_stage_status "local_yum_source" "failed" "YUM配置脚本不存在"
+        return 1
+    fi
+
+    # 在镜像仓库服务器执行YUM配置脚本
+    if ssh_execute_script "$registry_server" "$yum_script" "$iso_file" "配置YUM源"; then
+        log_success "YUM源配置成功"
+    else
+        log_error "YUM源配置失败"
+        save_stage_status "local_yum_source" "failed" "YUM源配置失败"
+        return 1
+    fi
+
+    # 5. 验证YUM源配置结果
+    log_info "步骤5: 验证YUM源配置结果"
+
+    # 验证镜像仓库服务器的YUM源
+    if ssh_execute_check "$registry_server" "yum clean all >/dev/null 2>&1 && yum repolist >/dev/null 2>&1" "验证YUM源配置"; then
+        log_success "镜像仓库服务器YUM源验证成功"
+    else
+        log_error "镜像仓库服务器YUM源验证失败"
+        save_stage_status "local_yum_source" "failed" "YUM源验证失败"
+        return 1
+    fi
+
+    # 验证所有节点的YUM源可用性
+    local failed_nodes=()
     for server_ip in "${all_nodes[@]}"; do
-        if ! ssh_execute "$server_ip" "yum repolist | grep -q 'KubeEasy'"; then
+        if ssh_execute_check "$server_ip" "yum clean all >/dev/null 2>&1 && yum repolist >/dev/null 2>&1" "验证节点YUM源"; then
+            log_success "节点 $server_ip YUM源验证成功"
+        else
             log_error "节点 $server_ip YUM源验证失败"
             failed_nodes+=("$server_ip")
-        else
-            log_success "节点 $server_ip YUM源验证成功"
         fi
     done
 
+    # 检查结果
     if [ ${#failed_nodes[@]} -eq 0 ]; then
-        save_stage_status "local_yum_source" "success" "本地YUM源配置完成"
-        log_success "本地YUM源配置完成"
+        save_stage_status "local_yum_source" "success" "本地YUM源配置完成 (${#all_nodes[@]} 个节点)"
+        log_success "本地YUM源配置完成，所有节点验证通过"
         return 0
     else
         log_error "部分节点YUM源配置失败: ${failed_nodes[*]}"

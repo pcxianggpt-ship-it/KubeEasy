@@ -65,12 +65,15 @@ else
 #
 #    yum clean all > /dev/null
 #    yum makecache > /dev/null
+    mount -o loop /tmp/k8s/*.iso /mnt/
+    mkdir -p /var/www/html/
+    cp -r /mnt/Package  /var/www/html/Kylinos
 
-    tar -xzf $2/k8s_install/06.repo/*.tar -C /var/www/html
+
     yum -q clean all
     yum -q makecache
 
-    if [ $(yum -q search kubelet | wc -l)  -gt "0" ]; then
+    if [ $(yum -q search socat | wc -l)  -gt "0" ]; then
         echo "【SUCCESS】: 本地yum源已经安装"
     else
         echo "【ERROR】: 本地yum源安装失败"
