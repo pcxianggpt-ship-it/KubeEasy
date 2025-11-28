@@ -382,6 +382,7 @@ distribute_file() {
 
         # 使用scp分发，目录使用-r参数
         if scp $scp_option "$local_path" "root@$server:$full_remote_path"; then
+        echo "scp $scp_option $local_path root@$server:$full_remote_path"
             log_success "$item_type分发成功: $local_path -> $server:$full_remote_path"
         else
             log_error "$item_type分发失败: $local_path -> $server:$full_remote_path"
@@ -1598,108 +1599,100 @@ configure_local_yum_source() {
     log_info "开始配置本地YUM源"
     save_stage_status "local_yum_source" "in_progress" "配置本地YUM源"
 
-    # 1. 验证YUM源是否存在
-    log_info "步骤1: 验证YUM源存在性"
-    local yum_available=false
+    # 1. 将01.rpm_package/k8srepo_kylinos_sp3_amd.tar 分发至registry服务器的/var/www/html/下
+    log_info "第一步: 分发YUM源包到registry服务器"
+    local yum_source_tar="$data_path/01.rpm_package/k8srepo_kylinos_sp3_amd.tar.gz"
 
-    # 检查任意一个节点的YUM源可用性
-    if [ ${#all_nodes[@]} -gt 0 ]; then
-        local test_node="${all_nodes[0]}"
-        if ssh_execute_check "$test_node" "yum clean all >/dev/null 2>&1 && yum repolist >/dev/null 2>&1" "YUM源可用性测试"; then
-            log_success "YUM源已可用，跳过配置"
-            save_stage_status "local_yum_source" "success" "YUM源已可用"
-            return 0
-        else
-            log_info "YUM源不可用，开始配置"
+    if [ ! -f "$yum_source_tar" ]; then
+        log_error "YUM源包不存在: $yum_source_tar"
+        save_stage_status "local_yum_source" "failed" "YUM源包不存在"
+        return 1
+    fi
+
+    # 分发到所有registry服务器
+    local failed_registries=()
+    for registry_ip in "${registry_ips[@]}"; do
+        log_info "分发YUM源包到registry服务器: $registry_ip"
+
+        # 确保远程/var/www/html目录存在
+        if ! ssh_execute_check "$registry_ip" "mkdir -p /var/www/html" "创建/var/www/html目录"; then
+            log_error "在registry服务器 $registry_ip 创建/var/www/html目录失败"
+            failed_registries+=("$registry_ip")
+            continue
         fi
-    else
-        log_error "节点列表为空，无法验证YUM源"
-        save_stage_status "local_yum_source" "failed" "节点列表为空"
-        return 1
-    fi
 
-    # 2. 根据config.yaml获取registry地址
-    log_info "步骤2: 获取镜像仓库地址"
-    if [ ${#registry_ips[@]} -eq 0 ]; then
-        log_error "镜像仓库地址列表为空，请检查config.yaml配置"
-        save_stage_status "local_yum_source" "failed" "镜像仓库地址为空"
-        return 1
-    fi
-
-    local registry_server="${registry_ips[0]}"
-    log_info "使用镜像仓库服务器: $registry_server"
-
-    # 3. 分发ISO文件到镜像仓库服务器
-    log_info "步骤3: 分发ISO文件到镜像仓库服务器"
-    local iso_file="Kylin-Server-V10-SP3-General-Release-2212-X86_64.iso"
-    local local_iso_path="$data_path/06.repo"
-    local remote_iso_path="/data/06.repo"
-
-    if [ ! -f "$local_iso_path" ]; then
-        log_error "ISO文件不存在: $local_iso_path"
-        save_stage_status "local_yum_source" "failed" "ISO文件不存在"
-        return 1
-    fi
-
-    log_info "分发ISO文件: $local_iso_path -> $registry_server:$remote_iso_path"
-    if distribute_file "$local_iso_path" "/data/" "$registry_server"; then
-        log_success "ISO文件分发成功"
-    else
-        log_error "ISO文件分发失败"
-        save_stage_status "local_yum_source" "failed" "ISO文件分发失败"
-        return 1
-    fi
-
-    # 4. 在镜像仓库服务器执行01.yum.sh脚本
-    log_info "步骤4: 在镜像仓库服务器配置YUM源"
-
-    # 检查01.yum.sh脚本是否存在
-    local yum_script="installscript/01.yum.sh"
-    if [ ! -f "$yum_script" ]; then
-        log_error "YUM配置脚本不存在: $yum_script"
-        save_stage_status "local_yum_source" "failed" "YUM配置脚本不存在"
-        return 1
-    fi
-
-    # 在镜像仓库服务器执行YUM配置脚本
-    if ssh_execute_script "$registry_server" "$yum_script" "$iso_file" "配置YUM源"; then
-        log_success "YUM源配置成功"
-    else
-        log_error "YUM源配置失败"
-        save_stage_status "local_yum_source" "failed" "YUM源配置失败"
-        return 1
-    fi
-
-    # 5. 验证YUM源配置结果
-    log_info "步骤5: 验证YUM源配置结果"
-
-    # 验证镜像仓库服务器的YUM源
-    if ssh_execute_check "$registry_server" "yum clean all >/dev/null 2>&1 && yum repolist >/dev/null 2>&1" "验证YUM源配置"; then
-        log_success "镜像仓库服务器YUM源验证成功"
-    else
-        log_error "镜像仓库服务器YUM源验证失败"
-        save_stage_status "local_yum_source" "failed" "YUM源验证失败"
-        return 1
-    fi
-
-    # 验证所有节点的YUM源可用性
-    local failed_nodes=()
-    for server_ip in "${all_nodes[@]}"; do
-        if ssh_execute_check "$server_ip" "yum clean all >/dev/null 2>&1 && yum repolist >/dev/null 2>&1" "验证节点YUM源"; then
-            log_success "节点 $server_ip YUM源验证成功"
+        # 分发tar包到/var/www/html/目录
+        if scp "$yum_source_tar" "root@$registry_ip:/var/www/html/k8srepo_kylinos_sp3_amd.tar"; then
+            log_success "YUM源包分发成功: $registry_ip"
         else
-            log_error "节点 $server_ip YUM源验证失败"
-            failed_nodes+=("$server_ip")
+            log_error "YUM源包分发失败: $registry_ip"
+            failed_registries+=("$registry_ip")
         fi
     done
 
-    # 检查结果
-    if [ ${#failed_nodes[@]} -eq 0 ]; then
-        save_stage_status "local_yum_source" "success" "本地YUM源配置完成 (${#all_nodes[@]} 个节点)"
-        log_success "本地YUM源配置完成，所有节点验证通过"
+    if [ ${#failed_registries[@]} -ne 0 ]; then
+        log_error "部分registry服务器分发失败: ${failed_registries[*]}"
+        save_stage_status "local_yum_source" "failed" "YUM源包分发失败"
+        return 1
+    fi
+
+    # 2. 在registry服务器上执行01.yum.sh安装yum源
+    log_info "第二步: 在registry服务器上安装YUM源"
+
+    # 分发01.yum.sh脚本到registry服务器
+    if ! distribute_file "installscript/01.yum.sh" "/tmp/01.yum.sh" "${registry_ips[@]}"; then
+        log_error "01.yum.sh脚本分发失败"
+        save_stage_status "local_yum_source" "failed" "01.yum.sh脚本分发失败"
+        return 1
+    fi
+
+    # 在每个registry服务器上执行yum源安装
+    local failed_installations=()
+    for registry_ip in "${registry_ips[@]}"; do
+        log_info "在registry服务器 $registry_ip 安装YUM源"
+
+        # 执行01.yum.sh脚本 (参数1: tar包文件名)
+        if ssh_execute_script "$registry_ip" "/tmp/01.yum.sh" "k8srepo_kylinos_sp3_amd.tar" "安装YUM源"; then
+            log_success "YUM源安装成功: $registry_ip"
+        else
+            log_error "YUM源安装失败: $registry_ip"
+            failed_installations+=("$registry_ip")
+        fi
+    done
+
+    if [ ${#failed_installations[@]} -ne 0 ]; then
+        log_error "部分registry服务器YUM源安装失败: ${failed_installations[*]}"
+        save_stage_status "local_yum_source" "failed" "YUM源安装失败"
+        return 1
+    fi
+
+    # 3. 验证：执行yum search kubelet，有结果打印出来则为成功
+    log_info "第三步: 验证YUM源安装结果"
+
+    local failed_validations=()
+    for registry_ip in "${registry_ips[@]}"; do
+        log_info "验证registry服务器 $registry_ip 的YUM源"
+
+        # 执行yum search kubelet并检查结果
+        local search_result=$(ssh_execute "$registry_ip" "yum search kubelet 2>/dev/null" true)
+
+        if [ -n "$search_result" ] && echo "$search_result" | grep -q "kubelet"; then
+            log_success "YUM源验证成功: $registry_ip"
+            log_info "kubelet搜索结果:"
+            echo "$search_result" | head -5
+        else
+            log_error "YUM源验证失败: $registry_ip - 无法搜索到kubelet"
+            failed_validations+=("$registry_ip")
+        fi
+    done
+
+    # 检查验证结果
+    if [ ${#failed_validations[@]} -eq 0 ]; then
+        save_stage_status "local_yum_source" "success" "本地YUM源配置完成 (${#registry_ips[@]} 个registry服务器)"
+        log_success "所有registry服务器YUM源配置和验证完成"
         return 0
     else
-        log_error "部分节点YUM源配置失败: ${failed_nodes[*]}"
+        log_error "部分registry服务器YUM源验证失败: ${failed_validations[*]}"
         save_stage_status "local_yum_source" "failed" "YUM源验证失败"
         return 1
     fi

@@ -1,126 +1,95 @@
 ## 参数说明
-## $1 repo源ip
-## $2 k8s_install路径
-## $3 master1 ip
+## $1 repo源名称
 
 # 检查是否提供了参数
 if [ -z "$1" ]; then
-  echo "【ERROR】 : 01.yum_server.sh 缺少repo源ip参数"
-  exit 1
-fi
-if [ -z "$2" ]; then
-  echo "【ERROR】 : 01.yum_server.sh 缺少k8s_install路径参数"
-  exit 1
-fi
-if [ -z "$3" ]; then
-  echo "【ERROR】 : 01.yum_server.sh 缺少master1 ip参数"
+  echo "【ERROR】 : 01.yum.sh 缺少repo源名称参数"
   exit 1
 fi
 
-if [ ! -s "/etc/yum.repos.d/local.repo" ]; then
+repo_source_name="$1"
 
-cat << EOF | tee /etc/yum.repos.d/local.repo > /dev/null
-[local-yum]
+# 1. 验证/var/www/html/$1文件是否存在
+if [ ! -f "/var/www/html/$repo_source_name" ]; then
+    echo "【ERROR】: YUM源文件不存在: /var/www/html/$repo_source_name"
+    exit 1
+fi
+
+echo "【INFO】: 找到YUM源文件: /var/www/html/$repo_source_name"
+
+cd  /var/www/html/
+tar -zxf $repo_source_name
+
+# 2. 添加.repo文件
+if [ ! -s "/etc/yum.repos.d/k8s.repo" ]; then
+cat << EOF | tee /etc/yum.repos.d/k8s.repo > /dev/null
+[k8s-yum]
 name=rhel7
-baseurl=file:///var/www/html/kylinos/Packages
-enabled=1  
+baseurl=file:///var/www/html/repo/
+enabled=1
 gpgcheck=0
 EOF
-
+    echo "【INFO】: 创建k8s.repo文件"
+else
+    echo "【INFO】: k8s.repo文件已存在"
 fi
 
-if [[ -f /etc/yum.repos.d/kylin_x86_64.repo ]]; then
-    mv /etc/yum.repos.d/kylin_x86_64.repo /etc/yum.repos.d/kylin_x86_64.repo.bak > /dev/null
-fi
-
-
+# 3. 刷新缓存
 yum -q clean all
 yum -q makecache
 
-# 如果能找不到conntrack，说明源没有安装，如果能找到直接跳过
-
+# 4. 验证k8s yum源是否存在
+echo "【INFO】: 验证k8s yum源..."
 if [ $(yum -q search kubelet | wc -l)  -gt "0" ]; then
     echo "【SUCCESS】: 本地yum源已经安装"
+    echo "【INFO】: kubelet包搜索结果:"
+    yum search kubelet | head -5
 else
-    mkdir -p /var/www/html
-
-#    # 挂载iso文件
-#    checkmount=$(ls $2/k8s_install/06.repo/repo | wc -l)
-#    if [[ $checkmount == "0"  ]]; then
-#        mount -o loop $2/k8s_install/06.repo/*.iso $2/k8s_install/06.repo/repo
-#    fi
-#    
-#    if [[ ! -d  $2/k8s_install/06.repo/repo/repodata ]]; then
-#        echo "【ERROR】: 源文件挂载失败"
-#        exit 1
-#    fi
-#
-#    #检查是否已经复制
-#    checkRpmNum=$(ls /var/www/html/kylinos/Packages | wc -l)
-#    if [[ $checkRpmNum -lt "100" ]]; then
-#        scp $2/k8s_install/06.repo/repo/Packages/*.rpm /var/www/html/kylinos/Packages
-#        scp $2/k8s_install/01.rpm_package/kubelet/*.rpm  /var/www/html/kylinos/Packages
-#        scp -r $2/k8s_install/06.repo/repo/repodata /var/www/html/kylinos
-#    fi
-#
-#    yum clean all > /dev/null
-#    yum makecache > /dev/null
-    mount -o loop /tmp/k8s/*.iso /mnt/
-    mkdir -p /var/www/html/
-    cp -r /mnt/Package  /var/www/html/Kylinos
-
-
-    yum -q clean all
-    yum -q makecache
-
-    if [ $(yum -q search socat | wc -l)  -gt "0" ]; then
-        echo "【SUCCESS】: 本地yum源已经安装"
-    else
-        echo "【ERROR】: 本地yum源安装失败"
-        exit 1
-    fi
+    echo "【ERROR】: 本地yum源安装失败，无法找到kubelet包"
+    exit 1
 fi
 
-
-
-
-checkhttpd=$( systemctl status httpd | grep Active | wc -l )
+# 5. 安装httpd并开机自启动服务
+checkhttpd=$( systemctl status httpd 2>/dev/null | grep -c "active (running)" )
 if [ $checkhttpd != "0" ]; then
-    echo "【SUCCESS】: httpd服务已经安装"
+    echo "【SUCCESS】: httpd服务已经安装并运行"
 else
-    echo "正在安装httpd"
+    echo "【INFO】: 正在安装httpd服务"
     yum -yq install httpd > /dev/null
-    echo "httpd安装结束"
-    
-    checkhttpd=$( systemctl status httpd | grep Active | wc -l )
-    if [ $checkhttpd == "0" ]; then
-        echo "【SUCCESS】: httpd服务安装失败"
+    if [ $? -eq 0 ]; then
+        echo "【SUCCESS】: httpd安装成功"
+    else
+        echo "【ERROR】: httpd安装失败"
         exit 1
+    fi
+
+    systemctl start httpd
+
+    # 检查httpd服务状态
+    checkhttpd=$( systemctl status httpd 2>/dev/null | grep -c "active (running)" )
+    if [ $checkhttpd == "0" ]; then
+        echo "【ERROR】: httpd服务启动失败"
+        exit 1
+    else
+        echo "【SUCCESS】: httpd服务启动成功"
     fi
 fi
 
-
-## 配置httpd
-# httpd_conf=$( cat /etc/httpd/conf/httpd.conf | grep kylinos | wc -l )
-
-# if [ $httpd_conf  == "0" ]; then
-# cat << EOF | tee -a /etc/httpd/conf/httpd.conf > /dev/null
-# DocumentRoot "/var/www/html/kylinos"
-# <Directory "/var/www/html/kylinos/">
-#     Options Indexes FollowSymLinks
-#     AllowOverride None
-#     Require all granted
-# </Directory>
-# EOF
-# fi
-
-systemctl enable httpd > /dev/null
-systemctl restart httpd
-
-
-if  [ $(yum -q search kubelet | wc -l)  -gt "0" ]; then
-    echo "【SUCCESS】: 本地repo源已经安装"
+# 设置httpd开机自启动
+systemctl enable httpd > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo "【SUCCESS】: httpd服务已设置开机自启动"
 else
-    echo "【ERROR】: 本地repo源安装失败"
+    echo "【ERROR】: httpd服务设置开机自启动失败"
+    exit 1
+fi
+
+# 最终验证
+echo "【INFO】: 最终验证yum源..."
+if [ $(yum -q search kubelet | wc -l)  -gt "0" ]; then
+    echo "【SUCCESS】: 本地repo源安装完成并验证通过"
+    exit 0
+else
+    echo "【ERROR】: 本地repo源最终验证失败"
     exit 1
 fi
