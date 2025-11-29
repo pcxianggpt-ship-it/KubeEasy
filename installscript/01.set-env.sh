@@ -247,3 +247,11 @@ else
     echo "【ERROR】：sysctl部分参数不符合预期"
     exit 1
 fi
+
+systemctl enable systemd-resolved > /dev/null 2>&1
+if  systemctl list-unit-files -t service | grep systemd-resolved | awk '{print $NF}' | grep -q "enabled" ; then
+	echo "【SUCCESS】： systemd-resolved 自启动"
+else
+	echo "【ERROR】： systemd-resolved 自启动"
+	exit 1
+fi

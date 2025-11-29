@@ -1528,76 +1528,57 @@ install_k8s_dependencies() {
     log_info "开始安装K8s依赖包"
     save_stage_status "dependencies" "in_progress" "安装K8s依赖包"
 
-    # 获取目标K8s版本
-    local k8s_version=$(yq eval '.cluster.version' "${CONFIG_FILE:-config.yaml}" | tr -d '"')
-    log_info "目标Kubernetes版本: $k8s_version"
+    # 串行安装依赖包到每个节点
+    local failed_nodes=()
+    log_info "开始安装K8s依赖包到 ${#k8s_nodes[@]} 个节点"
 
-    # 分发依赖包
-    log_info "分发K8s依赖包到所有节点..."
-    if ! distribute_file "$data_path/01.rpm_package/$k8s_version" "/tmp/k8s/rpm" "${k8s_nodes[@]}"; then
-        log_error "K8s依赖包分发失败，脚本退出"
-        save_stage_status "dependencies" "failed" "依赖包分发失败"
-        exit 1
-    fi
-    log_success "K8s依赖包分发完成"
+    for server_ip in "${k8s_nodes[@]}"; do
+        log_info "在节点 $server_ip 安装K8s依赖包"
 
-    local os
-
-    log_info "分发K8s依赖包到所有节点..."
-    if ! distribute_file "$data_path/01.rpm_package/system/$os" "/tmp/k8s/rpm" "${k8s_nodes[@]}"; then
-        log_error "K8s依赖包分发失败，脚本退出"
-        save_stage_status "dependencies" "failed" "依赖包分发失败"
-        exit 1
-    fi
-    log_success "K8s依赖包分发完成"
-
-    # 并发安装依赖包
-    if ssh_execute_script_batch \
-        "installscript/04.Dependency-Package-rpm.sh" \
-        "$k8s_version" "安装K8s依赖包" true \
-        "${k8s_nodes[@]}"; then
-
-        log_info "依赖包安装完成，开始验证版本..."
-
-        # 验证所有节点的依赖包版本
-        local failed_nodes=()
-        for server_ip in "${k8s_nodes[@]}"; do
-            if ! verify_k8s_dependency_versions "$server_ip" "$k8s_version"; then
-                log_error "节点 $server_ip 依赖包版本验证失败"
-                failed_nodes+=("$server_ip")
-            fi
-        done
-
-        # 检查验证结果
-        if [ ${#failed_nodes[@]} -eq 0 ]; then
-            save_stage_status "dependencies" "success" "K8s依赖包安装和版本验证完成"
-            log_success "所有节点K8s依赖包版本验证通过"
-            return 0
+        # 直接执行04.Dependency-Package-yum.sh脚本进行安装
+        if ssh_execute_script "$server_ip" "installscript/04.Dependency-Package-yum.sh" "$k8s_version" "安装K8s依赖包"; then
+            log_success "K8s依赖包安装成功: $server_ip"
         else
-            log_error "以下节点依赖包版本验证失败: ${failed_nodes[*]}"
-            log_error "请检查依赖包版本是否与K8s版本 $k8s_version 匹配"
-            save_stage_status "dependencies" "failed" "依赖包版本验证失败"
-            exit 1
+            log_error "K8s依赖包安装失败: $server_ip"
+            failed_nodes+=("$server_ip")
+            continue
         fi
+
+        # 验证该节点的依赖包版本
+        if ! verify_k8s_dependency_versions "$server_ip" "$k8s_version"; then
+            log_error "节点 $server_ip 依赖包版本验证失败"
+            failed_nodes+=("$server_ip")
+        else
+            log_success "节点 $server_ip 依赖包版本验证通过"
+        fi
+    done
+
+    # 检查安装结果
+    if [ ${#failed_nodes[@]} -eq 0 ]; then
+        save_stage_status "dependencies" "success" "K8s依赖包安装和版本验证完成"
+        log_success "所有节点K8s依赖包安装和版本验证通过"
+        return 0
     else
+        log_error "以下节点K8s依赖包安装或验证失败: ${failed_nodes[*]}"
+        log_error "请检查依赖包版本是否与K8s版本 $k8s_version 匹配"
         save_stage_status "dependencies" "failed" "K8s依赖包安装失败"
         exit 1
     fi
 }
 
 #=============================================================================
-# YUM源配置函数
+# 本地k8s repo源配置函数
 #=============================================================================
 
-# 配置本地YUM源
-configure_local_yum_source() {
+# 配置本地k8s repo源
+configure_k8srepo_source() {
     if is_stage_completed "local_yum_source"; then
         log_info "本地YUM源配置已完成，跳过"
         return 0
     fi
 
-    log_info "开始配置本地YUM源"
-    save_stage_status "local_yum_source" "in_progress" "配置本地YUM源"
+    log_info "开始配置本地k8s repo源"
+    save_stage_status "local_yum_source" "in_progress" "配置本地k8s repo源"
 
     # 1. 将01.rpm_package/k8srepo_kylinos_sp3_amd.tar 分发至registry服务器的/var/www/html/下
     log_info "第一步: 分发YUM源包到registry服务器"
@@ -1785,14 +1766,6 @@ main() {
 
     # 初始化节点变量
     initialize_node_variables
-
-    # 配置本地YUM源
-    log_info "检查和配置本地YUM源"
-    if ! configure_local_yum_source; then
-        log_error "安装失败在步骤: 配置本地YUM源"
-        exit 1
-    fi
-
     # 验证配置
     validate_config
 
@@ -1803,6 +1776,13 @@ main() {
     log_info "第二步: 配置SSH免密登录"
     if ! setup_ssh_keyless; then
         log_error "安装失败在步骤: 配置SSH免密登录"
+        exit 1
+    fi
+
+    # 配置本地k8s repo源
+    log_info "检查和配置本地k8s repo源"
+    if ! configure_k8srepo_source; then
+        log_error "安装失败在步骤: 配置本地k8s repo源"
         exit 1
     fi
 
