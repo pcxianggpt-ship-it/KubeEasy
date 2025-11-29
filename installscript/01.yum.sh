@@ -17,6 +17,8 @@ fi
 
 echo "【INFO】: 找到YUM源文件: /var/www/html/$repo_source_name"
 
+
+
 cd  /var/www/html/
 tar -zxf $repo_source_name
 
@@ -63,25 +65,39 @@ else
         exit 1
     fi
 
-    systemctl start httpd
+    systemctl enable httpd --now
 
-    # 检查httpd服务状态
+    # 检查httpd服务状态和开机自启状态
     checkhttpd=$( systemctl status httpd 2>/dev/null | grep -c "active (running)" )
+    checkenabled=$( systemctl is-enabled httpd 2>/dev/null )
+
     if [ $checkhttpd == "0" ]; then
         echo "【ERROR】: httpd服务启动失败"
         exit 1
     else
         echo "【SUCCESS】: httpd服务启动成功"
     fi
+
+    if [ "$checkenabled" == "enabled" ]; then
+        echo "【SUCCESS】: httpd服务已设置开机自启"
+    else
+        echo "【ERROR】: httpd服务设置开机自启失败"
+        exit 1
+    fi
 fi
 
-# 设置httpd开机自启动
-systemctl enable httpd > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "【SUCCESS】: httpd服务已设置开机自启动"
-else
-    echo "【ERROR】: httpd服务设置开机自启动失败"
+
+# 关闭防火墙
+echo "【INFO】: 关闭防火墙服务"
+systemctl stop firewalld >/dev/null 2>&1
+systemctl disable firewalld >/dev/null 2>&1
+
+# 检查防火墙状态
+if systemctl is-active firewalld >/dev/null 2>&1; then
+    echo "【ERROR】: 防火墙关闭失败"
     exit 1
+else
+    echo "【SUCCESS】: 防火墙已关闭并禁用开机自启"
 fi
 
 # 最终验证

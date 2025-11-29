@@ -1639,20 +1639,13 @@ configure_local_yum_source() {
     # 2. 在registry服务器上执行01.yum.sh安装yum源
     log_info "第二步: 在registry服务器上安装YUM源"
 
-    # 分发01.yum.sh脚本到registry服务器
-    if ! distribute_file "installscript/01.yum.sh" "/tmp/01.yum.sh" "${registry_ips[@]}"; then
-        log_error "01.yum.sh脚本分发失败"
-        save_stage_status "local_yum_source" "failed" "01.yum.sh脚本分发失败"
-        return 1
-    fi
-
     # 在每个registry服务器上执行yum源安装
     local failed_installations=()
     for registry_ip in "${registry_ips[@]}"; do
         log_info "在registry服务器 $registry_ip 安装YUM源"
 
-        # 执行01.yum.sh脚本 (参数1: tar包文件名)
-        if ssh_execute_script "$registry_ip" "/tmp/01.yum.sh" "k8srepo_kylinos_sp3_amd.tar" "安装YUM源"; then
+        # 使用ssh_execute_script执行01.yum.sh脚本 (参数1: tar包文件名)
+        if ssh_execute_script "$registry_ip" "installscript/01.yum.sh" "k8srepo_kylinos_sp3_amd.tar" "安装YUM源"; then
             log_success "YUM源安装成功: $registry_ip"
         else
             log_error "YUM源安装失败: $registry_ip"
@@ -1666,10 +1659,56 @@ configure_local_yum_source() {
         return 1
     fi
 
-    # 3. 验证：执行yum search kubelet，有结果打印出来则为成功
-    log_info "第三步: 验证YUM源安装结果"
+    # 3. 在其他服务器上执行01.yum_client.sh创建k8s-http.repo文件
+    log_info "第三步: 在其他服务器上配置YUM客户端"
+
+    # 分发01.yum_client.sh脚本到所有非registry节点
+    local client_nodes=()
+    for node_ip in "${all_nodes[@]}"; do
+        local is_registry=false
+        for registry_ip in "${registry_ips[@]}"; do
+            if [ "$node_ip" = "$registry_ip" ]; then
+                is_registry=true
+                break
+            fi
+        done
+        if [ "$is_registry" = false ]; then
+            client_nodes+=("$node_ip")
+        fi
+    done
+
+    if [ ${#client_nodes[@]} -gt 0 ]; then
+        log_info "在 ${#client_nodes[@]} 个客户端节点配置YUM源"
+
+        # 在客户端节点上执行01.yum_client.sh
+        local failed_client_configurations=()
+        for client_ip in "${client_nodes[@]}"; do
+            log_info "在客户端节点 $client_ip 配置YUM源"
+
+            # 使用ssh_execute_script执行01.yum_client.sh脚本 (参数1: registry IP)
+            if ssh_execute_script "$client_ip" "installscript/01.yum_client.sh" "${registry_ips[0]}" "配置YUM客户端"; then
+                log_success "YUM客户端配置成功: $client_ip"
+            else
+                log_error "YUM客户端配置失败: $client_ip"
+                failed_client_configurations+=("$client_ip")
+            fi
+        done
+
+        if [ ${#failed_client_configurations[@]} -ne 0 ]; then
+            log_error "部分客户端节点YUM配置失败: ${failed_client_configurations[*]}"
+            save_stage_status "local_yum_source" "failed" "YUM客户端配置失败"
+            return 1
+        fi
+    else
+        log_info "没有需要配置的客户端节点"
+    fi
+
+    # 4. 验证：执行yum search kubelet，有结果打印出来则为成功
+    log_info "第四步: 验证YUM源安装结果"
 
     local failed_validations=()
+
+    # 验证registry服务器
     for registry_ip in "${registry_ips[@]}"; do
         log_info "验证registry服务器 $registry_ip 的YUM源"
 
@@ -1679,10 +1718,35 @@ configure_local_yum_source() {
         if [ -n "$search_result" ] && echo "$search_result" | grep -q "kubelet"; then
             log_success "YUM源验证成功: $registry_ip"
             log_info "kubelet搜索结果:"
-            echo "$search_result" | head -5
+            echo "$search_result" | head -3
         else
             log_error "YUM源验证失败: $registry_ip - 无法搜索到kubelet"
             failed_validations+=("$registry_ip")
+        fi
+    done
+
+    # 验证客户端服务器
+    for client_ip in "${client_nodes[@]}"; do
+        log_info "验证客户端服务器 $client_ip 的YUM源"
+
+        # 检查k8s-http.repo文件是否存在
+        if ssh_execute "$client_ip" "test -f /etc/yum.repos.d/k8s-http.repo"; then
+            log_success "k8s-http.repo文件存在: $client_ip"
+
+            # 执行yum search kubelet并检查结果
+            local search_result=$(ssh_execute "$client_ip" "yum search kubelet 2>/dev/null" true)
+
+            if [ -n "$search_result" ] && echo "$search_result" | grep -q "kubelet"; then
+                log_success "YUM源验证成功: $client_ip"
+                log_info "kubelet搜索结果:"
+                echo "$search_result" | head -3
+            else
+                log_error "YUM源验证失败: $client_ip - 无法搜索到kubelet"
+                failed_validations+=("$client_ip")
+            fi
+        else
+            log_error "k8s-http.repo文件不存在: $client_ip"
+            failed_validations+=("$client_ip")
         fi
     done
 
