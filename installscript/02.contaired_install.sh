@@ -24,13 +24,26 @@ tar -zxf nerdctl-2.2.0-linux-amd64.tar.gz
 chmod +x nerdctl
 mv nerdctl /usr/local/bin/
 #修改nerdctl0地址   使用jq修改 gateway  subnet
-##
-##
-cat /etc/cni/net.d/nerdctl-bridge.conflist
 
+mkdir -p /etc/containerd/certs.d/$registry:5000
+cat > /etc/containerd/certs.d/$registry:5000/hosts.toml <<EOF
+server = "http://$registry:5000"
 
-#修改containerd配置
-vim /etc/containerd/config.toml
+[host."http://$registry:5000"]
+  capabilities = ["pull", "resolve", "push"]
+EOF
+
+systemctl daemon-reload
+systemctl enable --now containerd
+
+## 拉取busybox，自动生成cni文件
+nerdctl pull $1:5000/busybox:1.33.1
+nerdctl run $1:5000/busybox:1.33.1
+
+## 修改cni网段配置
+sed -i 's/"gateway":"[^"]*"/"gateway":"172.20.0.1"/g' /etc/cni/net.d/nerdctl-bridge.conflist
+sed -i 's/"subnet":"[^"]*"/"subnet":"172.20.0.0\/24"/g' /etc/cni/net.d/nerdctl-bridge.conflist
+
 
 
 systemctl daemon-reload
