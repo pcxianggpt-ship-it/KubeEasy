@@ -1,6 +1,9 @@
-## 创建工作目录
-mkdir -p $1/k8s_install
+## 参数解析
+# $1: 工作目录路径
+# $2: IPv6地址（可选）
 
+DATA_PATH="$1"
+IPV6_ADDR="$2"
 
 ## 关闭swap
 
@@ -121,18 +124,7 @@ fi
 ## IPv6 网卡配置
 echo "开始配置IPv6网卡..."
 
-# 从配置文件获取IPv6地址
-if [ -f /tmp/k8s/config.yaml ]; then
-    if command -v yq >/dev/null 2>&1; then
-        IPV6_ADDR=$(yq eval '.network.ipv6_addr // "fd00:42::171"' /tmp/k8s/config.yaml | tr -d '"')
-    else
-        # 简单解析方法，如果没有yq则使用默认值
-        IPV6_ADDR="fd00:42::171"
-    fi
-else
-    IPV6_ADDR="fd00:42::171"
-fi
-
+# IPv6地址已经在脚本开头解析并存储在IPV6_ADDR变量中
 echo "使用IPv6地址: $IPV6_ADDR"
 
 # 获取主网卡名称

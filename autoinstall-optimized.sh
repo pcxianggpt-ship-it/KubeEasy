@@ -16,6 +16,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LOG_FILE="${SCRIPT_DIR}/logs/install.log"
 readonly STATUS_DIR="${SCRIPT_DIR}/status"
 
+# 配置文件绝对路径
+CONFIG_FILE="${SCRIPT_DIR}/config.yaml"
+if [ $# -gt 0 ] && [ -f "${1}" ]; then
+    CONFIG_FILE="$(cd "$(dirname "${1}")" && pwd)/$(basename "${1}")"
+fi
+
 # 创建必要目录
 mkdir -p "$(dirname "$LOG_FILE")" "$STATUS_DIR"
 
@@ -25,7 +31,7 @@ mkdir -p "$(dirname "$LOG_FILE")" "$STATUS_DIR"
 
 # 加载配置文件
 load_config() {
-    local config_file="${1:-config.yaml}"
+    local config_file="${1:-$CONFIG_FILE}"
 
     if [ ! -f "$config_file" ]; then
         echo "错误: 配置文件 $config_file 不存在"
@@ -739,7 +745,7 @@ generate_hosts_content() {
 
 # 初始化节点变量
 initialize_node_variables() {
-    local config_file="${CONFIG_FILE:-config.yaml}"
+    local config_file="$CONFIG_FILE"
 
     if ! command -v yq >/dev/null 2>&1; then
         log_error "yq工具未安装，无法初始化节点变量"
@@ -878,7 +884,7 @@ setup_ssh_keyless() {
     save_stage_status "ssh_keyless" "in_progress" "配置SSH免密登录"
 
     # 从配置文件读取节点密码
-    local config_file="${CONFIG_FILE:-config.yaml}"
+    local config_file="$CONFIG_FILE"
     local node_password=$(yq eval '.system.node_password // ""' "$config_file" | tr -d '"')
 
     if [ -z "$node_password" ]; then
@@ -1012,7 +1018,7 @@ EOF
 
 # 配置主机名和hosts文件 (基于config.yaml)
 configure_hostname_hosts() {
-    local config_file="${CONFIG_FILE:-config.yaml}"
+    local config_file="$CONFIG_FILE"
 
     log_info "开始配置主机名和hosts文件 (基于配置: $config_file)"
     save_stage_status "hostname_hosts" "in_progress" "配置主机名和hosts"
@@ -1208,18 +1214,104 @@ configure_environment() {
     log_info "开始配置环境变量"
     save_stage_status "environment" "in_progress" "配置环境变量"
 
-    # 并发配置所有节点的环境变量
-    if ssh_execute_script_batch \
-        "installscript/01.set-env.sh" \
-        "$data_path" "配置环境变量" true \
-        "${k8s_nodes[@]}"; then
+    # 为每个节点配置环境变量，传入对应的IPv6地址
+    local failed_nodes=()
 
-        save_stage_status "environment" "success" "环境变量配置完成"
+    for server_ip in "${k8s_nodes[@]}"; do
+        log_info "为节点 $server_ip 配置环境变量"
+
+        # 获取该节点对应的IPv6地址
+        local ipv6_addr=$(yq '[.servers.master[], .servers.workers[]] | .[] | select(.ip == "$server_ip") | .ipv6' $config_file )
+
+        if [ -z "$ipv6_addr" ]; then
+            log_error "无法获取节点 $server_ip 的IPv6地址，使用默认值"
+            ipv6_addr="fd00:42::171"
+        fi
+
+        log_info "节点 $server_ip 使用IPv6地址: $ipv6_addr"
+
+
+        # 执行环境配置脚本，传入data_path和IPv6地址
+        if ssh_execute_script "$server_ip" "installscript/01.set-env.sh" "$data_path $ipv6_addr" "配置环境变量"; then
+            log_success "环境变量配置成功: $server_ip (IPv6: $ipv6_addr)"
+        else
+            log_error "环境变量配置失败: $server_ip"
+            failed_nodes+=("$server_ip")
+        fi
+    done
+
+    # 检查结果
+    if [ ${#failed_nodes[@]} -eq 0 ]; then
+        save_stage_status "environment" "success" "环境变量配置完成 (${#k8s_nodes[@]} 个节点)"
+        log_success "所有节点环境变量配置完成"
         return 0
     else
+        log_error "部分节点环境变量配置失败: ${#failed_nodes[@]} 个节点"
+        log_error "失败节点: ${failed_nodes[*]}"
         save_stage_status "environment" "failed" "环境变量配置失败"
         return 1
     fi
+}
+
+# 获取服务器对应的IPv6地址
+get_server_ipv6_address() {
+    local server_ip="$1"
+    local config_file="$CONFIG_FILE"
+
+    # 检查yq工具是否可用
+    if ! command -v yq >/dev/null 2>&1; then
+        log_warning "yq工具未安装，使用默认IPv6地址"
+        echo "fd00:42::171"
+        return 0
+    fi
+
+    # 检查配置文件是否存在
+    if [ ! -f "$config_file" ]; then
+        log_warning "配置文件不存在: $config_file，使用默认IPv6地址"
+        echo "fd00:42::171"
+        return 0
+    fi
+
+    # 根据服务器IP查找对应的IPv6地址
+    # 首先检查控制节点
+    local master_count=$(yq eval '.servers.master | length' "$config_file" 2>/dev/null)
+    for ((i=0; i<master_count; i++)); do
+        local ip=$(yq eval ".servers.master[$i].ip" "$config_file" 2>/dev/null | tr -d '"')
+        if [ "$ip" = "$server_ip" ]; then
+            # 尝试获取该节点的IPv6地址配置
+            local ipv6_addr=$(yq eval ".servers.master[$i].ipv6_addr // \"fd00:42::$((i+1))\"" "$config_file" 2>/dev/null | tr -d '"')
+            echo "$ipv6_addr"
+            return 0
+        fi
+    done
+
+    # 然后检查工作节点
+    local worker_count=$(yq eval '.servers.workers | length' "$config_file" 2>/dev/null)
+    for ((i=0; i<worker_count; i++)); do
+        local ip=$(yq eval ".servers.workers[$i].ip" "$config_file" 2>/dev/null | tr -d '"')
+        if [ "$ip" = "$server_ip" ]; then
+            # 尝试获取该节点的IPv6地址配置
+            local ipv6_addr=$(yq eval ".servers.workers[$i].ipv6_addr // \"fd00:42::$((i+101))\"" "$config_file" 2>/dev/null | tr -d '"')
+            echo "$ipv6_addr"
+            return 0
+        fi
+    done
+
+    # 最后检查镜像仓库节点
+    local registry_count=$(yq eval '.servers.registry | length' "$config_file" 2>/dev/null)
+    for ((i=0; i<registry_count; i++)); do
+        local ip=$(yq eval ".servers.registry[$i].ip" "$config_file" 2>/dev/null | tr -d '"')
+        if [ "$ip" = "$server_ip" ]; then
+            # 尝试获取该节点的IPv6地址配置
+            local ipv6_addr=$(yq eval ".servers.registry[$i].ipv6_addr // \"fd00:42::$((i+201))\"" "$config_file" 2>/dev/null | tr -d '"')
+            echo "$ipv6_addr"
+            return 0
+        fi
+    done
+
+    # 如果找不到对应配置，使用默认值
+    log_warning "未找到节点 $server_ip 的IPv6地址配置，使用默认值"
+    echo "fd00:42::171"
 }
 
 # 配置DNS
@@ -1353,7 +1445,7 @@ install_containerd() {
 # 容器运行时安装函数 (根据K8s版本选择)
 install_container_runtime() {
     # 从config.yaml读取K8s版本
-    local k8s_version=$(yq eval '.cluster.version' "${CONFIG_FILE:-config.yaml}" | tr -d '"')
+    local k8s_version=$(yq eval '.cluster.version' "$CONFIG_FILE" | tr -d '"')
     log_info "检测到Kubernetes版本: $k8s_version"
 
     case "$k8s_version" in
@@ -1749,10 +1841,9 @@ configure_k8srepo_source() {
 
 # 主安装函数
 main() {
-    local config_file="${1:-config.yaml}"
+    local config_file="${1:-$CONFIG_FILE}"
 
     log_info "开始 KubeEasy Kubernetes 集群安装"
-    log_info "配置文件: $config_file"
 
     # 环境检查
     log_info "第一步: 环境检查和工具安装"
