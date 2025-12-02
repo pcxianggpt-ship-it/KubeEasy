@@ -1221,11 +1221,11 @@ configure_environment() {
         log_info "为节点 $server_ip 配置环境变量"
 
         # 获取该节点对应的IPv6地址
-        local ipv6_addr=$(yq '[.servers.master[], .servers.workers[]] | .[] | select(.ip == "$server_ip") | .ipv6' $config_file )
+        local ipv6_addr=$(yq '[.servers.master[], .servers.workers[]] | .[] | select(.ip == "'"$server_ip"'") | .ipv6' $config_file)
 
         if [ -z "$ipv6_addr" ]; then
             log_error "无法获取节点 $server_ip 的IPv6地址，使用默认值"
-            ipv6_addr="fd00:42::171"
+            exit 1
         fi
 
         log_info "节点 $server_ip 使用IPv6地址: $ipv6_addr"

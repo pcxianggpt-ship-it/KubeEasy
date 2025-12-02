@@ -247,3 +247,102 @@ else
 	echo "【ERROR】： systemd-resolved 自启动"
 	exit 1
 fi
+
+## 重启网络服务使IPv6配置生效
+echo "正在重启网络服务使IPv6配置生效..."
+
+# 重启网络服务
+systemctl restart network > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+    echo "【SUCCESS】：网络服务重启成功"
+else
+    echo "【WARNING】：网络服务重启失败，尝试重启NetworkManager"
+    systemctl restart NetworkManager > /dev/null 2>&1
+    if [ $? -eq 0 ]; then
+        echo "【SUCCESS】：NetworkManager重启成功"
+    else
+        echo "【ERROR】：网络服务重启失败"
+    fi
+fi
+
+# 等待网络稳定
+sleep 3
+
+## 验证IPv6配置
+echo "==================== IPv6配置验证 ===================="
+
+# 验证主网卡是否获得IPv6地址
+if [ -n "$MAIN_NIC" ]; then
+    echo "检查主网卡 $MAIN_NIC 的IPv6配置..."
+
+    # 显示网卡IPv6地址
+    ipv6_addrs=$(ip -6 addr show dev "$MAIN_NIC" | grep "inet6" | grep -v "fe80" | awk '{print $2}' | cut -d'/' -f1)
+
+    if [ -n "$ipv6_addrs" ]; then
+        echo "【SUCCESS】：主网卡已获得IPv6地址:"
+        echo "$ipv6_addrs"
+    else
+        echo "【WARNING】：主网卡未获得非链路本地IPv6地址"
+    fi
+
+    # 显示所有IPv6地址（包括链路本地）
+    echo "主网卡所有IPv6地址:"
+    ip -6 addr show dev "$MAIN_NIC" | grep "inet6" | awk '{print "  " $2}'
+
+    # 验证期望的IPv6地址是否存在
+    if [ -n "$IPV6_ADDR" ]; then
+        if ip -6 addr show dev "$MAIN_NIC" | grep -q "$IPV6_ADDR"; then
+            echo "【SUCCESS】：期望的IPv6地址 $IPV6_ADDR 已配置"
+        else
+            echo "【ERROR】：期望的IPv6地址 $IPV6_ADDR 未找到"
+        fi
+    fi
+else
+    echo "【ERROR】：无法验证IPv6配置，主网卡未识别"
+fi
+
+# 验证IPv6路由
+echo "==================== IPv6路由验证 ===================="
+ipv6_routes=$(ip -6 route | grep -v "^fd00")
+if [ -n "$ipv6_routes" ]; then
+    echo "IPv6路由表:"
+    
+    echo "$ipv6_routes"
+else
+    echo "【WARNING】：未发现IPv6路由"
+fi
+
+# 验证IPv6连通性（ping网关）
+if [ -n "$MAIN_NIC" ]; then
+    gateway_ipv6=$(ip -6 route | grep "default via" | awk '{print $3}' | head -1)
+    if [ -n "$gateway_ipv6" ]; then
+        echo "测试IPv6网关连通性: $gateway_ipv6"
+        if ping6 -c 3 -W 2 "$gateway_ipv6" > /dev/null 2>&1; then
+            echo "【SUCCESS】：IPv6网关连通正常"
+        else
+            echo "【WARNING】：IPv6网关连通失败"
+        fi
+    fi
+fi
+
+# 验证系统IPv6参数
+echo "==================== 系统IPv6参数验证 ===================="
+sysctl_params=(
+    "net.ipv6.conf.all.disable_ipv6"
+    "net.ipv6.conf.default.disable_ipv6"
+    "net.ipv6.conf.lo.disable_ipv6"
+    "net.ipv6.conf.all.forwarding"
+    "net.ipv6.conf.default.forwarding"
+)
+
+for param in "${sysctl_params[@]}"; do
+    value=$(sysctl -n "$param" 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        echo "  $param = $value"
+    else
+        echo "  $param = 未找到"
+    fi
+done
+
+echo "==================== IPv6配置完成 ===================="
+echo "IPv6配置已完成并验证"
