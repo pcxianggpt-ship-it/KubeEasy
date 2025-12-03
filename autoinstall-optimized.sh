@@ -1659,6 +1659,145 @@ install_k8s_dependencies() {
 }
 
 #=============================================================================
+# 镜像仓库安装函数
+#=============================================================================
+
+# 安装镜像仓库
+install_registry() {
+    if is_stage_completed "registry"; then
+        log_info "镜像仓库安装已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始安装镜像仓库"
+    save_stage_status "registry" "in_progress" "安装镜像仓库"
+
+    # 检查registry服务器列表
+    if [ ${#registry_ips[@]} -eq 0 ]; then
+        log_error "没有找到镜像仓库服务器配置"
+        save_stage_status "registry" "failed" "没有镜像仓库服务器配置"
+        return 1
+    fi
+
+    # 获取系统架构
+    local arch=$(uname -m)
+    local arch_type=""
+
+    case "$arch" in
+        "x86_64")
+            arch_type="amd"
+            ;;
+        "aarch64"|"arm64")
+            arch_type="arm"
+            ;;
+        *)
+            log_error "不支持的系统架构: $arch"
+            save_stage_status "registry" "failed" "不支持的系统架构: $arch"
+            return 1
+            ;;
+    esac
+
+    log_info "系统架构: $arch_type"
+
+    # 为每个registry服务器安装镜像仓库
+    local failed_registries=()
+
+    for registry_ip in "${registry_ips[@]}"; do
+        log_info "在镜像仓库服务器 $registry_ip 安装镜像仓库"
+
+        # 构建参数
+        local params="$registry_ip $arch_type $registry_user $registry_passwd"
+
+        # 检查是否需要加密（从配置文件读取）
+        local registry_auth=$(yq eval '.registry.auth // "no"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+
+        if [ "$registry_auth" = "null" ] || [ -z "$registry_auth" ]; then
+            registry_auth="no"
+        fi
+
+        params="$params $registry_auth"
+
+        log_info "安装参数: IP=$registry_ip, 架构=$arch_type, 认证=$registry_auth"
+
+        # 分发registry tar文件到节点
+        log_info "分发registry tar文件到节点: $registry_ip"
+        local registry_tar_source="$data_path/04.registry/registry-2.8.3.tar"
+
+        if [ ! -f "$registry_tar_source" ]; then
+            log_error "Registry tar文件不存在: $registry_tar_source"
+            failed_registries+=("$registry_ip")
+            continue
+        fi
+
+        # 使用distribute_file函数分发registry tar文件到所有registry节点
+        if distribute_file "$registry_tar_source" "/data" "$registry_ip"; then
+            log_success "Registry tar文件分发成功: $registry_ip"
+        else
+            log_error "Registry tar文件分发失败: $registry_ip"
+            failed_registries+=("$registry_ip")
+            continue
+        fi
+
+        # 执行镜像仓库安装脚本
+        if ssh_execute_script "$registry_ip" "installscript/03.registry_install.sh" "$params" "安装镜像仓库"; then
+            # 验证镜像仓库服务是否启动
+            log_info "验证镜像仓库服务状态: $registry_ip"
+
+            # 检查registry服务端口
+            if check_port_listening "$registry_ip" "5000"; then
+                log_success "镜像仓库服务端口5000正常监听: $registry_ip"
+            else
+                log_error "镜像仓库服务端口5000未监听: $registry_ip"
+                failed_registries+=("$registry_ip")
+                continue
+            fi
+
+            # 检查registry UI端口
+            if check_port_listening "$registry_ip" "5080"; then
+                log_success "镜像仓库UI端口5080正常监听: $registry_ip"
+            else
+                log_warning "镜像仓库UI端口5080未监听: $registry_ip (可能是UI服务未启用)"
+            fi
+
+            # 验证Docker镜像是否导入成功
+            local registry_images=$(ssh_execute "$registry_ip" "docker images | grep -E '(registry|registry-ui)' | wc -l" true)
+            if [ "$registry_images" -ge 1 ]; then
+                log_success "镜像仓库Docker镜像导入成功: $registry_ip (数量: $registry_images)"
+            else
+                log_error "镜像仓库Docker镜像导入失败: $registry_ip"
+                failed_registries+=("$registry_ip")
+                continue
+            fi
+
+            log_success "镜像仓库安装成功: $registry_ip"
+        else
+            log_error "镜像仓库安装失败: $registry_ip"
+            failed_registries+=("$registry_ip")
+        fi
+    done
+
+    # 检查安装结果
+    if [ ${#failed_registries[@]} -eq 0 ]; then
+        save_stage_status "registry" "success" "镜像仓库安装完成 (${#registry_ips[@]} 个节点)"
+        log_success "所有镜像仓库服务器安装完成"
+
+        # 输出镜像仓库访问信息
+        log_info "镜像仓库访问信息:"
+        for registry_ip in "${registry_ips[@]}"; do
+            log_info "  镜像仓库地址: http://$registry_ip:5000"
+            log_info "  镜像仓库UI: http://$registry_ip:5080"
+        done
+
+        return 0
+    else
+        log_error "部分镜像仓库服务器安装失败: ${#failed_registries[@]} 个节点"
+        log_error "失败节点: ${failed_registries[*]}"
+        save_stage_status "registry" "failed" "镜像仓库安装失败"
+        return 1
+    fi
+}
+
+#=============================================================================
 # 本地k8s repo源配置函数
 #=============================================================================
 
