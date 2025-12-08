@@ -25,11 +25,21 @@ chmod +x nerdctl
 mv nerdctl /usr/local/bin/
 #修改nerdctl0地址   使用jq修改 gateway  subnet
 
+## 配置镜像仓库地址
 mkdir -p /etc/containerd/certs.d/$registry:5000
 cat > /etc/containerd/certs.d/$registry:5000/hosts.toml <<EOF
 server = "http://$registry:5000"
 
 [host."http://$registry:5000"]
+  capabilities = ["pull", "resolve", "push"]
+EOF
+
+## 配置镜像仓库地址域名
+mkdir -p /etc/containerd/certs.d/registry:5000
+cat > /etc/containerd/certs.d/registry:5000/hosts.toml <<EOF
+server = "http://registry:5000"
+
+[host."http://registry:5000"]
   capabilities = ["pull", "resolve", "push"]
 EOF
 
