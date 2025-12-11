@@ -1030,12 +1030,6 @@ configure_hostname_hosts() {
         return 1
     fi
 
-    if ! command -v yq >/dev/null 2>&1; then
-        log_error "yq工具未安装，请先安装yq"
-        save_stage_status "hostname_hosts" "failed" "yq工具未安装"
-        return 1
-    fi
-
     # 使用yq直接读取配置信息并生成hosts文件内容
     log_info "使用yq解析配置文件..."
 
@@ -1093,11 +1087,10 @@ configure_hostname_hosts() {
     echo "================================"
 
     # 统计节点数量
-    local total_nodes=$((master_count + worker_count + registry_count))
+    local total_nodes=$((master_count + worker_count ))
     log_info "发现服务器总数: $total_nodes"
     log_info "控制节点: $master_count 个"
     log_info "工作节点: $worker_count 个"
-    log_info "镜像仓库节点: $registry_count 个"
 
     # 合并所有节点IP用于分发hosts文件
     local all_ips=()
@@ -1108,9 +1101,6 @@ configure_hostname_hosts() {
     done
     for ((i=0; i<worker_count; i++)); do
         all_ips+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
-    done
-    for ((i=0; i<registry_count; i++)); do
-        all_ips+=($(yq eval ".servers.registry[$i].ip" "$config_file"))
     done
 
     # 分发hosts文件到所有节点
@@ -1163,27 +1153,6 @@ configure_hostname_hosts() {
             log_success "工作节点主机名设置成功: $server_ip -> $hostname"
         else
             log_error "工作节点主机名设置失败: $server_ip -> $hostname"
-            failed_hosts+=("$server_ip")
-        fi
-    done
-
-    # 配置镜像仓库节点主机名
-    log_info "配置镜像仓库节点主机名..."
-    for ((i=0; i<registry_count; i++)); do
-        local server_ip=$(yq eval ".servers.registry[$i].ip" "$config_file")
-        local hostname=$(yq eval ".servers.registry[$i].hostname" "$config_file" | tr -d '"')
-
-        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
-            log_error "跳过镜像仓库节点 $server_ip：缺少hostname配置"
-            failed_hosts+=("$server_ip")
-            continue
-        fi
-
-        log_info "配置镜像仓库节点: $server_ip -> $hostname"
-        if ssh_execute_check "$server_ip" "hostnamectl set-hostname $hostname" "设置主机名: $hostname"; then
-            log_success "镜像仓库节点主机名设置成功: $server_ip -> $hostname"
-        else
-            log_error "镜像仓库节点主机名设置失败: $server_ip -> $hostname"
             failed_hosts+=("$server_ip")
         fi
     done
