@@ -157,9 +157,15 @@ ssh_execute() {
     log_debug "在 $server 执行: $command"
 
     if [ "$show_output" = "true" ]; then
-        ssh root@"$server" "$command" 2>&1
+        ssh root@"$server" "$command" 2>&1 || {
+            log_error "SSH命令执行失败: $server -> $command"
+            exit 1
+        }
     else
-        ssh root@"$server" "$command" >/dev/null 2>&1
+        ssh root@"$server" "$command" >/dev/null 2>&1 || {
+            log_error "SSH命令执行失败: $server -> $command"
+            exit 1
+        }
     fi
 }
 
@@ -374,21 +380,26 @@ distribute_file() {
         return 1
     fi
 
+
     for server in "${servers[@]}"; do
-        # 对于目录，需要确保远程路径存在
-        if [ "$item_type" = "目录" ]; then
+        # 对于文件，需要确保远程目录存在
+        if [ "$item_type" = "文件" ]; then
+            # 创建远程目录（如果不存在）
+            ssh_execute "$server" "mkdir -p $remote_path" >/dev/null 2>&1
+            local full_remote_path="$remote_path"
+        elif [ "$item_type" = "目录" ]; then
             # 创建远程目录（如果不存在）
             ssh_execute "$server" "mkdir -p $remote_path" >/dev/null 2>&1
             # 获取本地目录名
             local dir_name=$(basename "$local_path")
             local full_remote_path="$remote_path/$dir_name"
         else
-            local full_remote_path="$remote_path"
+            log_error "不支持的路径类型: $local_path"
+            return 1
         fi
 
         # 使用scp分发，目录使用-r参数
         if scp $scp_option "$local_path" "root@$server:$full_remote_path"; then
-        echo "scp $scp_option $local_path root@$server:$full_remote_path"
             log_success "$item_type分发成功: $local_path -> $server:$full_remote_path"
         else
             log_error "$item_type分发失败: $local_path -> $server:$full_remote_path"
@@ -1018,6 +1029,11 @@ EOF
 
 # 配置主机名和hosts文件 (基于config.yaml)
 configure_hostname_hosts() {
+    if is_stage_completed "hostname_hosts"; then
+        log_info "主机名和hosts配置已完成，跳过"
+        return 0
+    fi
+
     local config_file="$CONFIG_FILE"
 
     log_info "开始配置主机名和hosts文件 (基于配置: $config_file)"
@@ -1373,18 +1389,11 @@ install_containerd() {
     log_info "开始安装Containerd"
     save_stage_status "containerd" "in_progress" "安装Containerd"
 
-    # 解压Containerd安装包
-    log_info "解压Containerd安装包"
-    tar -xzf "$data_path/02.install_package/containerd-1.7.18-linux-amd64.tar.gz" -C /usr/local/
-    exit_status_check "Containerd安装包解压" || return 1
-
     # 分发Containerd二进制文件到所有节点
     log_info "分发Containerd二进制文件到所有节点"
 
     # 使用distribute_file函数分发containerd相关目录
-    distribute_file "/usr/local/bin/containerd*" "/usr/local/bin" "${all_nodes[@]}"
-    distribute_file "/usr/local/sbin/runc" "/usr/local/sbin" "${all_nodes[@]}"
-    distribute_file "/usr/local/bin/ctr" "/usr/local/bin" "${all_nodes[@]}"
+    distribute_file "$data_path/02.container_runtime" "/tmp/k8s" "${all_nodes[@]}"
 
     for server_ip in "${all_nodes[@]}"; do
         if ! check_containerd_installed "$server_ip"; then
@@ -1690,7 +1699,7 @@ install_registry() {
 
         # 分发registry tar文件到节点
         log_info "分发registry tar文件到节点: $registry_ip"
-        local registry_tar_source="$data_path/04.registry/registry-2.8.3.tar"
+        local registry_tar_source="$data_path/04.registry/registry-2.8.3.tar.gz"
 
         if [ ! -f "$registry_tar_source" ]; then
             log_error "Registry tar文件不存在: $registry_tar_source"
@@ -1699,7 +1708,7 @@ install_registry() {
         fi
 
         # 使用distribute_file函数分发registry tar文件到所有registry节点
-        if distribute_file "$registry_tar_source" "/data" "$registry_ip"; then
+        if distribute_file "$registry_tar_source" "/data/" "$registry_ip"; then
             log_success "Registry tar文件分发成功: $registry_ip"
         else
             log_error "Registry tar文件分发失败: $registry_ip"
@@ -1708,7 +1717,7 @@ install_registry() {
         fi
 
         # 执行镜像仓库安装脚本
-        if ssh_execute_script "$registry_ip" "installscript/03.registry_install.sh" "$params" "安装镜像仓库"; then
+        if ssh_execute_script "$registry_ip" "installscript/03.registry_install_2.8.3.sh" "$params" "安装镜像仓库"; then
             # 验证镜像仓库服务是否启动
             log_info "验证镜像仓库服务状态: $registry_ip"
 
@@ -1726,16 +1735,6 @@ install_registry() {
                 log_success "镜像仓库UI端口5080正常监听: $registry_ip"
             else
                 log_warning "镜像仓库UI端口5080未监听: $registry_ip (可能是UI服务未启用)"
-            fi
-
-            # 验证Docker镜像是否导入成功
-            local registry_images=$(ssh_execute "$registry_ip" "docker images | grep -E '(registry|registry-ui)' | wc -l" true)
-            if [ "$registry_images" -ge 1 ]; then
-                log_success "镜像仓库Docker镜像导入成功: $registry_ip (数量: $registry_images)"
-            else
-                log_error "镜像仓库Docker镜像导入失败: $registry_ip"
-                failed_registries+=("$registry_ip")
-                continue
             fi
 
             log_success "镜像仓库安装成功: $registry_ip"
