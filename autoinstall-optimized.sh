@@ -1443,56 +1443,6 @@ install_container_runtime() {
     esac
 }
 
-# 拉取K8s基础镜像
-pull_k8s_images() {
-    log_info "开始拉取K8s基础镜像"
-
-    # Docker登录 (在本地执行)
-    docker login registry:5000 -u "$registry_user" -p "$registry_passwd" >/dev/null 2>&1
-
-    # 定义需要拉取的镜像
-    local images=(
-        "registry:5000/google_containers/pause:3.6"
-        "registry:5000/google_containers/kube-proxy:v1.23.17"
-        "registry:5000/google_containers/coredns:v1.8.6"
-    )
-
-    # 并发拉取镜像
-    local pids=()
-
-    for server_ip in "${k8s_nodes[@]}"; do
-        (
-            log_info "$server_ip: Docker登录并拉取镜像"
-
-            # Docker登录
-            ssh_execute "$server_ip" "docker login registry:5000 -u $registry_user -p $registry_passwd"
-
-            # 拉取所有镜像
-            local success=true
-            for image in "${images[@]}"; do
-                if ! ssh_execute "$server_ip" "docker pull $image"; then
-                    log_error "拉取镜像失败: $image on $server_ip"
-                    success=false
-                fi
-            done
-
-            if [ "$success" = "true" ]; then
-                log_success "节点 $server_ip 镜像拉取完成"
-            else
-                log_error "节点 $server_ip 镜像拉取失败"
-            fi
-        ) &
-        pids+=($!)
-    done
-
-    # 等待所有拉取完成
-    for pid in "${pids[@]}"; do
-        wait "$pid"
-    done
-
-    log_success "K8s基础镜像拉取完成"
-}
-
 # 验证K8s依赖包版本
 verify_k8s_dependency_versions() {
     local server="$1"
@@ -1943,6 +1893,317 @@ configure_k8srepo_source() {
 }
 
 #=============================================================================
+# Kubeadm替换函数 (仅本机执行)
+#==============================================================================
+
+# 替换kubeadm为支持100年证书的版本 (仅在本机执行)
+replace_kubeadm_local() {
+    if is_stage_completed "kubeadm_replacement"; then
+        log_info "kubeadm替换已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始在本机替换kubeadm为支持100年证书的版本"
+    save_stage_status "kubeadm_replacement" "in_progress" "替换kubeadm (本机)"
+
+    # 确保临时目录存在
+    mkdir -p /tmp/k8s
+
+    # 备份原始kubeadm
+    log_info "备份原始kubeadm..."
+    if [[ -f /usr/bin/kubeadm ]]; then
+        cp /usr/bin/kubeadm /tmp/k8s/kubeadm_bak
+        if [[ $? -eq 0 ]]; then
+            log_success "已备份原始kubeadm到 /tmp/k8s/kubeadm_bak"
+        else
+            log_error "kubeadm备份失败"
+            save_stage_status "kubeadm_replacement" "failed" "kubeadm备份失败"
+            return 1
+        fi
+    else
+        log_warning "原始kubeadm不存在，跳过备份"
+    fi
+
+    # 替换kubeadm为支持100年证书的版本
+    log_info "替换kubeadm为支持100年证书的版本..."
+    local kubeadm_100y_file="$data_path/01.rpm_package/kubeadm100y-amd"
+
+    if [[ -f "$kubeadm_100y_file" ]]; then
+        # 复制文件并设置执行权限
+        cp "$kubeadm_100y_file" /usr/bin/kubeadm
+        if [[ $? -eq 0 ]]; then
+            chmod +x /usr/bin/kubeadm
+            if [[ $? -eq 0 ]]; then
+                log_success "kubeadm已替换为支持100年证书的版本"
+
+                # 验证替换是否成功
+                if command -v kubeadm >/dev/null 2>&1; then
+                    local kubeadm_version=$(kubeadm version 2>/dev/null | head -1)
+                    log_success "kubeadm版本验证成功: $kubeadm_version"
+
+                    save_stage_status "kubeadm_replacement" "success" "kubeadm替换完成 (支持100年证书)"
+                    return 0
+                else
+                    log_error "kubeadm命令验证失败"
+                    save_stage_status "kubeadm_replacement" "failed" "kubeadm命令验证失败"
+                    return 1
+                fi
+            else
+                log_error "kubeadm权限设置失败"
+                save_stage_status "kubeadm_replacement" "failed" "kubeadm权限设置失败"
+                return 1
+            fi
+        else
+            log_error "kubeadm文件复制失败"
+            save_stage_status "kubeadm_replacement" "failed" "kubeadm文件复制失败"
+            return 1
+        fi
+    else
+        log_error "未找到kubeadm100y-amd文件: $kubeadm_100y_file"
+        log_error "请确保文件存在于 $data_path/01.rpm_package/ 目录下"
+        save_stage_status "kubeadm_replacement" "failed" "未找到kubeadm100y-amd文件"
+        return 1
+    fi
+}
+
+#=============================================================================
+# 集群初始化函数
+#==============================================================================
+
+# 初始化Kubernetes集群
+init_cluster() {
+    if is_stage_completed "cluster_init"; then
+        log_info "集群初始化已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始初始化Kubernetes集群"
+    save_stage_status "cluster_init" "in_progress" "初始化Kubernetes集群"
+
+    # 检查初始化脚本是否存在
+    local init_script="installscript/05.init-Cluster.sh"
+    if [ ! -f "$init_script" ]; then
+        log_error "集群初始化脚本不存在: $init_script"
+        save_stage_status "cluster_init" "failed" "集群初始化脚本不存在"
+        return 1
+    fi
+
+    log_info "在本机执行集群初始化脚本: $init_script"
+
+    # 在本机执行初始化脚本，传递双栈网络配置和数据目录参数
+    # 检查是否启用IPv6双栈网络
+    local dual_stack="N"
+    if [[ -n "$ipv6_enabled" && "$ipv6_enabled" == "true" ]]; then
+        dual_stack="Y"
+    fi
+
+    if bash "$init_script" "$dual_stack" ; then
+        log_success "集群初始化脚本执行成功"
+
+        # 验证集群初始化结果
+        log_info "验证集群初始化结果"
+
+        # 检查kubelet服务状态
+        if systemctl is-active kubelet >/dev/null 2>&1; then
+            log_success "kubelet服务运行正常"
+        else
+            log_error "kubelet服务未运行"
+            save_stage_status "cluster_init" "failed" "kubelet服务未运行"
+            return 1
+        fi
+
+        # 检查kubectl能否访问集群
+        if kubectl cluster-info >/dev/null 2>&1; then
+            log_success "kubectl可以访问集群"
+        else
+            log_error "kubectl无法访问集群"
+            save_stage_status "cluster_init" "failed" "kubectl无法访问集群"
+            return 1
+        fi
+
+        # 检查节点状态
+        local ready_nodes=$(kubectl get nodes --no-headers | grep -c "Ready")
+        if [ "$ready_nodes" -gt 0 ]; then
+            log_success "集群节点状态正常，就绪节点数: $ready_nodes"
+        else
+            log_error "没有就绪的集群节点"
+            save_stage_status "cluster_init" "failed" "没有就绪的集群节点"
+            return 1
+        fi
+
+        save_stage_status "cluster_init" "success" "Kubernetes集群初始化完成"
+        log_success "Kubernetes集群初始化完成"
+        return 0
+    else
+        log_error "集群初始化脚本执行失败"
+        save_stage_status "cluster_init" "failed" "集群初始化脚本执行失败"
+        return 1
+    fi
+}
+
+#=============================================================================
+# 节点加入集群函数
+#==============================================================================
+
+# 加入工作节点到集群
+join_worker_nodes() {
+    if is_stage_completed "worker_nodes_join"; then
+        log_info "工作节点加入集群已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始将工作节点加入集群"
+    save_stage_status "worker_nodes_join" "in_progress" "加入工作节点"
+
+    # 检查是否有工作节点需要加入
+    if [ ${#worker_ips[@]} -eq 0 ]; then
+        log_info "没有工作节点需要加入集群"
+        save_stage_status "worker_nodes_join" "success" "无工作节点需要加入"
+        return 0
+    fi
+
+    # 检查join命令文件是否存在
+    local join_nodes_file="/tmp/k8s/kube_join_nodes"
+    if [ ! -f "$join_nodes_file" ]; then
+        log_error "工作节点加入命令文件不存在: $join_nodes_file"
+        save_stage_status "worker_nodes_join" "failed" "工作节点加入命令文件不存在"
+        return 1
+    fi
+
+    log_info "开始处理 ${#worker_ips[@]} 个工作节点"
+
+    local failed_nodes=()
+    local success_nodes=()
+
+    for worker_ip in "${worker_ips[@]}"; do
+        log_info "处理工作节点: $worker_ip"
+
+        # 检查节点是否已加入集群
+        local existing_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$worker_ip" || echo "0")
+        if [ "$existing_nodes" -eq 1 ]; then
+            log_success "工作节点 $worker_ip 已在集群中，跳过加入"
+            success_nodes+=("$worker_ip")
+            continue
+        fi
+
+        log_info "开始为工作节点 $worker_ip 执行加入命令"
+
+        # 在工作节点上执行加入命令
+        if ssh_execute_script "$worker_ip" "$join_nodes_file" "" "加入工作节点"; then
+
+            # 等待一段时间让节点注册
+            log_info "等待节点 $worker_ip 注册到集群..."
+            sleep 30
+
+            # 再次检查节点是否成功加入
+            local joined_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$worker_ip" || echo "0")
+            if [ "$joined_nodes" -eq 1 ]; then
+                log_success "工作节点 $worker_ip 加入集群成功"
+                success_nodes+=("$worker_ip")
+            else
+                log_error "工作节点 $worker_ip 加入集群失败"
+                failed_nodes+=("$worker_ip")
+            fi
+        else
+            log_error "工作节点 $worker_ip 执行加入命令失败"
+            failed_nodes+=("$worker_ip")
+        fi
+    done
+
+    # 检查结果
+    if [ ${#failed_nodes[@]} -eq 0 ]; then
+        save_stage_status "worker_nodes_join" "success" "工作节点加入集群完成 (${#success_nodes[@]} 个节点)"
+        log_success "所有工作节点成功加入集群"
+        return 0
+    else
+        log_error "部分工作节点加入集群失败: ${#failed_nodes[@]} 个节点"
+        log_error "失败节点: ${failed_nodes[*]}"
+        save_stage_status "worker_nodes_join" "failed" "工作节点加入集群失败"
+        return 1
+    fi
+}
+
+# 加入主控节点到集群
+join_master_nodes() {
+    if is_stage_completed "master_nodes_join"; then
+        log_info "主控节点加入集群已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始将主控节点加入集群"
+    save_stage_status "master_nodes_join" "in_progress" "加入主控节点"
+
+    # 检查是否有其他主控节点需要加入（跳过第一个主节点，因为它是初始化节点）
+    if [ ${#master_ips[@]} -le 1 ]; then
+        log_info "只有一个主控节点，无需加入其他控制节点"
+        save_stage_status "master_nodes_join" "success" "无需加入其他控制节点"
+        return 0
+    fi
+
+    # 检查join命令文件是否存在
+    local join_master_file="/tmp/k8s/kube_join_master"
+    if [ ! -f "$join_master_file" ]; then
+        log_error "主控节点加入命令文件不存在: $join_master_file"
+        save_stage_status "master_nodes_join" "failed" "主控节点加入命令文件不存在"
+        return 1
+    fi
+
+    # 跳过第一个主节点（初始化节点），处理其他主节点
+    local other_master_ips=("${master_ips[@]:1}")
+    log_info "开始处理 ${#other_master_ips[@]} 个其他主控节点"
+
+    local failed_nodes=()
+    local success_nodes=()
+
+    for master_ip in "${other_master_ips[@]}"; do
+        log_info "处理主控节点: $master_ip"
+
+        # 检查节点是否已加入集群
+        local existing_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$master_ip" || echo "0")
+        if [ "$existing_nodes" -eq 1 ]; then
+            log_success "主控节点 $master_ip 已在集群中，跳过加入"
+            success_nodes+=("$master_ip")
+            continue
+        fi
+
+        log_info "开始为主控节点 $master_ip 执行加入命令"
+
+        # 在主控节点上执行加入命令
+        if ssh_execute_script "$master_ip" "$join_master_file" "" "加入主控节点"; then
+
+            # 等待一段时间让节点注册
+            log_info "等待主控节点 $master_ip 注册到集群..."
+            sleep 60
+
+            # 再次检查节点是否成功加入
+            local joined_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$master_ip" || echo "0")
+            if [ "$joined_nodes" -eq 1 ]; then
+                log_success "主控节点 $master_ip 加入集群成功"
+                success_nodes+=("$master_ip")
+            else
+                log_error "主控节点 $master_ip 加入集群失败"
+                failed_nodes+=("$master_ip")
+            fi
+        else
+            log_error "主控节点 $master_ip 执行加入命令失败"
+            failed_nodes+=("$master_ip")
+        fi
+    done
+
+    # 检查结果
+    if [ ${#failed_nodes[@]} -eq 0 ]; then
+        save_stage_status "master_nodes_join" "success" "主控节点加入集群完成 (${#success_nodes[@]} 个节点)"
+        log_success "所有其他主控节点成功加入集群"
+        return 0
+    else
+        log_error "部分主控节点加入集群失败: ${#failed_nodes[@]} 个节点"
+        log_error "失败节点: ${failed_nodes[*]}"
+        save_stage_status "master_nodes_join" "failed" "主控节点加入集群失败"
+        return 1
+    fi
+}
+
+#=============================================================================
 # 主安装流程
 #=============================================================================
 
@@ -1984,25 +2245,30 @@ main() {
         exit 1
     fi
 
-    log_info "第三步: 安装K8s依赖包"
+    log_info "第三步: 替换kubeadm为支持100年证书版本"
+    if ! replace_kubeadm_local; then
+        log_error "安装失败在步骤: 替换kubeadm"
+        exit 1
+    fi
+
+    log_info "第四步: 安装K8s依赖包"
     if ! install_k8s_dependencies; then
         log_error "安装失败在步骤: 安装K8s依赖包"
         exit 1
     fi
-
-    log_info "第四步: 配置主机名和hosts文件"
+    log_info "第五步: 配置主机名和hosts文件"
     if ! configure_hostname_hosts; then
         log_error "安装失败在步骤: 配置主机名和hosts文件"
         exit 1
     fi
 
-    log_info "第五步: 配置环境变量"
+    log_info "第六步: 配置环境变量"
     if ! configure_environment; then
         log_error "安装失败在步骤: 配置环境变量"
         exit 1
     fi
 
-    log_info "第六步: 配置DNS服务"
+    log_info "第七步: 配置DNS服务"
     if ! configure_dns; then
         log_error "安装失败在步骤: 配置DNS服务"
         exit 1
@@ -2013,17 +2279,10 @@ main() {
         log_error "安装失败在步骤: 安装容器运行时"
         exit 1
     fi
-    
-    log_info "第七步: 安装镜像仓库"
+
+    log_info "第九步: 安装镜像仓库"
     if ! install_registry; then
         log_error "安装失败在步骤: 安装镜像仓库"
-        exit 1
-    fi
-
-
-    log_info "第九步: 拉取K8s基础镜像"
-    if ! pull_k8s_images; then
-        log_error "安装失败在步骤: 拉取K8s基础镜像"
         exit 1
     fi
 
