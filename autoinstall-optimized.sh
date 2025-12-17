@@ -60,6 +60,9 @@ load_config() {
         export k8s_pod_subnet=$(yq eval '.network.pod_subnet // "10.244.0.0/16"' "$config_file" | tr -d '"')
         export k8s_service_subnet=$(yq eval '.network.service_subnet // "10.96.0.0/12"' "$config_file" | tr -d '"')
 
+        # 加载双栈配置
+        export DUAL_STACK=$(yq eval '.cluster.dualStack // "N"' "$config_file" | tr -d '"')
+
         log_info "配置加载完成:"
         log_info "  data_path: $data_path"
         log_info "  registry_ip: $registry_ip:$registry_port"
@@ -67,6 +70,7 @@ load_config() {
         log_info "  k8s_version: $k8s_version"
         log_info "  pod_subnet: $k8s_pod_subnet"
         log_info "  service_subnet: $k8s_service_subnet"
+        log_info "  dual_stack: $DUAL_STACK"
     else
         log_error "yq工具未安装，无法解析config.yaml，请先安装yq"
         exit 1
@@ -1990,14 +1994,9 @@ init_cluster() {
 
     log_info "在本机执行集群初始化脚本: $init_script"
 
-    # 在本机执行初始化脚本，传递双栈网络配置和数据目录参数
-    # 检查是否启用IPv6双栈网络
-    local dual_stack="N"
-    if [[ -n "$ipv6_enabled" && "$ipv6_enabled" == "true" ]]; then
-        dual_stack="Y"
-    fi
 
-    if bash "$init_script" "$dual_stack" ; then
+    # 在本机执行初始化脚本，传递双栈网络配置和数据目录参数
+    if bash "$init_script" "$DUAL_STACK" ; then
         log_success "集群初始化脚本执行成功"
 
         # 验证集群初始化结果
@@ -2039,6 +2038,86 @@ init_cluster() {
         save_stage_status "cluster_init" "failed" "集群初始化脚本执行失败"
         return 1
     fi
+}
+
+#=============================================================================
+# 网络组件配置函数
+#==============================================================================
+
+# 配置CNI网络组件 (Flannel)
+configure_cni_network() {
+    if is_stage_completed "cni_network"; then
+        log_info "CNI网络组件配置已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始配置CNI网络组件 (Flannel)"
+    save_stage_status "cni_network" "in_progress" "配置CNI网络组件"
+
+    # 3. 检查Flannel是否已经运行
+    log_info "检查Flannel Pod状态"
+    local running_flannel_pods=$(kubectl get pod -A | grep kube-flannel | grep Running | wc -l)
+
+    if [ "$running_flannel_pods" -eq "${#k8s_nodes[@]}" ]; then
+        log_success "Flannel已在所有节点上运行正常 (${running_flannel_pods}/${#k8s_nodes[@]})"
+        save_stage_status "cni_network" "success" "CNI网络组件配置完成 (Flannel已运行)"
+        return 0
+    fi
+
+
+    # 4. 应用Flannel配置
+    log_info "应用Flannel CNI配置"
+    if [ $DUAL_STACK == "N" ];then
+        local flannel_yaml="$data_path/03.setup_file/kube-flannel.yml"
+    else
+        local flannel_yaml="$data_path/03.setup_file/kube-flannel-dualstack.yml"
+    fi
+
+    if [ ! -f "$flannel_yaml" ]; then
+        log_error "Flannel配置文件不存在: $flannel_yaml"
+        save_stage_status "cni_network" "failed" "Flannel配置文件不存在"
+        return 1
+    fi
+
+    if kubectl apply -f "$flannel_yaml" > /dev/null 2>&1; then
+        log_success "Flannel配置应用成功"
+    else
+        log_error "Flannel配置应用失败"
+        save_stage_status "cni_network" "failed" "Flannel配置应用失败"
+        return 1
+    fi
+
+    # 5. 等待Flannel Pod启动
+    log_info "等待Flannel Pod启动..."
+    local flannel_counter=1
+    local max_attempts=30
+    local wait_time=10
+
+    while [ $flannel_counter -le $max_attempts ]; do
+        local running_pods=$(kubectl get pod -n kube-flannel 2>/dev/null | grep -i Running | wc -l)
+
+        if [ "$running_pods" -eq "${#k8s_nodes[@]}" ]; then
+            log_success "Flannel启动成功 ($running_pods/${#k8s_nodes[@]} 个Pod运行中)"
+            save_stage_status "cni_network" "success" "CNI网络组件配置完成 (Flannel)"
+            return 0
+        fi
+
+        log_info "等待Flannel Pod启动... ($flannel_counter/$max_attempts) 当前运行: $running_pods/${#k8s_nodes[@]}"
+        sleep $wait_time
+        flannel_counter=$((flannel_counter + 1))
+    done
+
+    # 6. 检查最终状态
+    log_error "Flannel启动超时或失败"
+    local final_running_pods=$(kubectl get pod -n kube-flannel 2>/dev/null | grep -i Running | wc -l)
+    log_error "最终状态: $final_running_pods/${#k8s_nodes[@]} 个Pod运行"
+
+    # 显示Pod状态用于调试
+    log_info "Flannel Pod状态详情:"
+    kubectl get pods -n kube-flannel -o wide 2>/dev/null || log_error "无法获取Pod状态"
+
+    save_stage_status "cni_network" "failed" "Flannel启动超时或失败"
+    return 1
 }
 
 #=============================================================================
@@ -2305,13 +2384,13 @@ main() {
     fi
 
     log_info "第十三步: 配置网络组件"
-    if ! configure_network; then
+    if ! configure_cni_network; then
         log_error "安装失败在步骤: 配置网络组件"
         exit 1
     fi
 
     log_info "第十四步: 配置存储组件"
-    if ! configure_storage; then
+    if ! configure_nfs_storage; then
         log_error "安装失败在步骤: 配置存储组件"
         exit 1
     fi

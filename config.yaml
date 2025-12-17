@@ -7,8 +7,9 @@
 cluster:
   name: "kubernetes"
   version: "v1.23.17"  # 选择 "v1.23.17" 或 "v1.30.14"
+  dualStack: "N"  # 是否部署双栈网络，N为ipv4  ，Y为ipv6+ipv4
   network:
-    pod_subnet: "10.42.0.0/16"
+    pod_subnet: "10.244.0.0/16"
     service_subnet: "10.96.0.0/12"
     dns_domain: "cluster.local"
 
