@@ -2283,6 +2283,183 @@ join_master_nodes() {
 }
 
 #=============================================================================
+# 存储组件配置函数
+#=============================================================================
+
+# 配置NFS存储
+configure_nfs_storage() {
+    if is_stage_completed "nfs_storage"; then
+        log_info "NFS存储配置已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始配置NFS存储"
+    save_stage_status "nfs_storage" "in_progress" "配置NFS存储"
+
+    # 检查是否启用NFS存储
+    local nfs_enable=$(yq eval '.storage.nfs.enable // "false"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+    if [ "$nfs_enable" != "true" ]; then
+        log_info "NFS存储未启用，跳过配置"
+        save_stage_status "nfs_storage" "success" "NFS存储未启用，跳过配置"
+        return 0
+    fi
+
+    # 获取NFS配置参数
+    local nfs_server_ip=$(yq eval '.storage.nfs.serverip' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+    local nfs_path=$(yq eval '.storage.nfs.path // "/data/nfs_root"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+    local storage_class=$(yq eval '.storage.storage_class // "nfs-client"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+
+    if [ -z "$nfs_server_ip" ]; then
+        log_error "NFS服务器IP未配置，请检查config.yaml中的storage.nfs.serverip配置"
+        save_stage_status "nfs_storage" "failed" "NFS服务器IP未配置"
+        return 1
+    fi
+
+    log_info "NFS配置参数："
+    log_info "  服务器IP: $nfs_server_ip"
+    log_info "  存储路径: $nfs_path"
+    log_info "  存储类: $storage_class"
+
+    # 1. 复制helm工具到本机/usr/local/bin
+    log_info "安装helm工具到本机"
+    if [ ! -f "tools/helm-amd" ]; then
+        log_error "helm工具不存在: tools/helm-amd"
+        save_stage_status "nfs_storage" "failed" "helm工具不存在"
+        return 1
+    fi
+
+    cp "tools/helm-amd" "/usr/local/bin/helm"
+    if [ $? -ne 0 ]; then
+        log_error "helm工具复制到本机失败"
+        save_stage_status "nfs_storage" "failed" "helm工具复制失败"
+        return 1
+    fi
+
+    chmod +x /usr/local/bin/helm
+    if [ $? -ne 0 ]; then
+        log_error "helm工具权限设置失败"
+        save_stage_status "nfs_storage" "failed" "helm工具权限设置失败"
+        return 1
+    fi
+
+    log_success "helm工具安装到本机成功"
+
+    # 2. 在NFS服务器端配置NFS服务
+    log_info "配置NFS服务器端: $nfs_server_ip"
+    if ssh_execute_script "$nfs_server_ip" "installscript/09.nfs_server.sh" "$nfs_path" "配置NFS服务器"; then
+        log_success "NFS服务器配置成功: $nfs_server_ip"
+    else
+        log_error "NFS服务器配置失败: $nfs_server_ip"
+        save_stage_status "nfs_storage" "failed" "NFS服务器配置失败"
+        return 1
+    fi
+
+    # 3. 在其他服务器上创建挂载点并挂载NFS
+    log_info "在其他节点上挂载NFS存储"
+    local failed_mounts=()
+
+    for node_ip in "${all_nodes[@]}"; do
+        if [ "$node_ip" != "$nfs_server_ip" ]; then
+            log_info "在节点 $node_ip 挂载NFS存储"
+            if ssh_execute_script "$node_ip" "installscript/09.nfs_mount.sh" "$nfs_path $node_ip $nfs_server_ip" "挂载NFS存储"; then
+                log_success "NFS存储挂载成功: $node_ip"
+            else
+                log_error "NFS存储挂载失败: $node_ip"
+                failed_mounts+=("$node_ip")
+            fi
+        fi
+    done
+
+    if [ ${#failed_mounts[@]} -gt 0 ]; then
+        log_error "部分节点NFS挂载失败: ${failed_mounts[*]}"
+        save_stage_status "nfs_storage" "failed" "部分节点NFS挂载失败"
+        return 1
+    fi
+
+    # 4. 使用helm安装NFS provisioner
+    log_info "使用helm安装NFS provisioner"
+
+    # 检查helm是否可用
+    if ! helm version >/dev/null 2>&1; then
+        log_error "helm工具不可用，无法安装NFS provisioner"
+        save_stage_status "nfs_storage" "failed" "helm工具不可用"
+        return 1
+    fi
+
+    # 创建nfs namespace（如果不存在）
+    kubectl create namespace nfs --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
+
+    # 构建helm安装命令
+    local helm_chart_path="$data_path/03.setup_file/allyaml/nfs"
+    local release_name="nfs-subdir-external-provisioner"
+
+    # 检查helm chart路径是否存在
+    log_info "检查helm chart路径: $helm_chart_path"
+    if [ ! -d "$helm_chart_path" ]; then
+        log_error "helm chart路径不存在: $helm_chart_path"
+        log_error "请确保NFS helm chart存在于指定路径"
+        save_stage_status "nfs_storage" "failed" "helm chart路径不存在"
+        return 1
+    fi
+
+    # 使用helm安装NFS provisioner
+    log_info "使用helm chart安装NFS provisioner"
+    if helm install "$release_name" "$helm_chart_path" \
+        --namespace nfs \
+        --set image.repository="registry:5000/nfs-subdir-external-provisioner" \
+        --set nfs.server="$nfs_server_ip" \
+        --set nfs.path="$nfs_path" \
+        --set storageClass.name="$storage_class" \
+        --set storageClass.defaultClass=true; then
+        log_success "NFS provisioner helm安装成功"
+    else
+        log_error "NFS provisioner helm安装失败"
+        save_stage_status "nfs_storage" "failed" "NFS provisioner helm安装失败"
+        return 1
+    fi
+
+    # 5. 验证NFS provisioner状态
+    log_info "验证NFS provisioner状态"
+    local provisioner_ready=false
+    local retry_count=0
+    local max_retries=30
+
+    while [ $retry_count -lt $max_retries ] && [ "$provisioner_ready" = "false" ]; do
+        local pod_status=$(kubectl get pod -n nfs -l app=nfs-client-provisioner -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+        if [ "$pod_status" = "Running" ]; then
+            provisioner_ready=true
+            log_success "NFS provisioner已就绪"
+        else
+            log_info "等待NFS provisioner就绪... ($((retry_count + 1))/$max_retries)"
+            sleep 10
+            retry_count=$((retry_count + 1))
+        fi
+    done
+
+    if [ "$provisioner_ready" = "false" ]; then
+        log_error "NFS provisioner启动超时"
+        kubectl get pods -n nfs
+        save_stage_status "nfs_storage" "failed" "NFS provisioner启动超时"
+        return 1
+    fi
+
+    # 验证存储类是否创建成功
+    if kubectl get storageclass "$storage_class" >/dev/null 2>&1; then
+        log_success "存储类 $storage_class 创建成功"
+    else
+        log_error "存储类 $storage_class 创建失败"
+        save_stage_status "nfs_storage" "failed" "存储类创建失败"
+        return 1
+    fi
+
+    save_stage_status "nfs_storage" "success" "NFS存储配置完成"
+    log_success "NFS存储配置完成"
+    log_info "存储类名称: $storage_class"
+    log_info "NFS服务器: $nfs_server_ip:$nfs_path"
+    return 0
+}
+
+#=============================================================================
 # 主安装流程
 #=============================================================================
 

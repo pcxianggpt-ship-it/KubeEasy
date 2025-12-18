@@ -113,7 +113,7 @@ storage:
   # NFS存储配置
   nfs:
     enable: true
-    server_ip: "192.168.62.174"
+    serverip: "192.168.62.174"
     path: "/data/nfs_root"
 
   # 存储类配置
