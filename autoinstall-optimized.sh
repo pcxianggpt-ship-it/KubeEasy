@@ -2339,7 +2339,7 @@ configure_nfs_storage() {
     fi
 
     # 获取NFS配置参数
-    local nfs_server_ip=$(yq eval '.storage.nfs.serverip' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+    local nfs_server_ip=$(yq eval '.storage.nfs.server_ip' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
     local nfs_path=$(yq eval '.storage.nfs.path // "/data/nfs_root"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
     local storage_class=$(yq eval '.storage.storage_class // "nfs-client"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
 
@@ -2414,7 +2414,7 @@ configure_nfs_storage() {
 
     # 使用helm安装NFS provisioner
     log_info "使用helm chart安装NFS provisioner"
-    if helm install "$release_name" "$helm_chart_path" \
+    if helm install "$release_name/$helm_chart_path" \
         --namespace nfs \
         --set image.repository="registry:5000/nfs-subdir-external-provisioner" \
         --set nfs.server="$nfs_server_ip" \
@@ -2477,6 +2477,12 @@ configure_nfs_storage() {
 main() {
     local config_file="${1:-$CONFIG_FILE}"
 
+    # 加载配置
+    load_config "$config_file"
+
+    # 初始化节点变量
+    initialize_node_variables
+
     log_info "开始 KubeEasy Kubernetes 集群安装"
 
     log_info "第一步: 配置本地yum源"
@@ -2491,12 +2497,6 @@ main() {
         log_error "环境检查失败，脚本退出"
         exit 1
     fi
-
-    # 加载配置
-    load_config "$config_file"
-
-    # 初始化节点变量
-    initialize_node_variables
 
     # 执行安装步骤
     log_info "第二步: 配置SSH免密登录"
