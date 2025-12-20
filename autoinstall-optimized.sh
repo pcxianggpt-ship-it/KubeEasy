@@ -63,6 +63,9 @@ load_config() {
         # 加载双栈配置
         export DUAL_STACK=$(yq eval '.cluster.dualStack // "N"' "$config_file" | tr -d '"')
 
+        # 获取k8sc1的IP（第一个master节点）
+        export k8sc1_ip=$(yq eval '.servers.master[0].ip' "$config_file" | tr -d '"')
+
         log_info "配置加载完成:"
         log_info "  data_path: $data_path"
         log_info "  registry_ip: $registry_ip:$registry_port"
@@ -71,6 +74,7 @@ load_config() {
         log_info "  pod_subnet: $k8s_pod_subnet"
         log_info "  service_subnet: $k8s_service_subnet"
         log_info "  dual_stack: $DUAL_STACK"
+        log_info "  k8sc1_ip: $k8sc1_ip"
     else
         log_error "yq工具未安装，无法解析config.yaml，请先安装yq"
         exit 1
@@ -564,6 +568,54 @@ install_yq() {
     fi
 }
 
+# 检查并安装helm工具
+install_helm() {
+    if command -v helm >/dev/null 2>&1; then
+        log_info "helm工具已安装"
+        return 0
+    fi
+
+    log_info "开始安装helm工具..."
+
+    # 获取系统架构
+    local arch=$(uname -m)
+    local helm_arch=""
+
+    case "$arch" in
+        "x86_64")
+            helm_arch="amd"
+            ;;
+        "aarch64"|"arm64")
+            helm_arch="arm"
+            ;;
+        *)
+            log_error "不支持的系统架构: $arch"
+            return 1
+            ;;
+    esac
+
+    # 优先从本地工具目录安装
+    if [ -f "tools/helm-${helm_arch}" ]; then
+        log_info "从本地工具目录安装helm"
+        cp "tools/helm-${helm_arch}" /usr/local/bin/helm
+        chmod +x /usr/local/bin/helm
+
+        # 验证安装
+        if command -v helm >/dev/null 2>&1; then
+            local helm_version=$(helm version --template='{{.Version}}' 2>/dev/null)
+            log_success "helm工具安装成功 (版本: $helm_version)"
+            return 0
+        else
+            log_error "helm工具安装失败"
+            return 1
+        fi
+    else
+        log_error "找不到本地helm工具文件: tools/helm-${helm_arch}"
+        log_error "请确保helm工具文件存在或手动安装helm"
+        return 1
+    fi
+}
+
 # 检查系统环境
 check_system_environment() {
     log_info "开始检查系统环境..."
@@ -610,6 +662,18 @@ check_system_environment() {
     # 检查并安装yq
     if ! install_yq; then
         log_error "yq工具安装失败"
+        return 1
+    fi
+
+    # 检查并安装helm
+    if ! install_helm; then
+        log_error "helm工具安装失败"
+        return 1
+    fi
+
+    # 检查并安装sshpass
+    if ! install_sshpass; then
+        log_error "sshpass工具安装失败"
         return 1
     fi
 
@@ -1724,89 +1788,58 @@ install_registry() {
 #=============================================================================
 
 # 配置本地k8s repo源
-configure_k8srepo_source() {
-    if is_stage_completed "local_yum_source"; then
+configure_k8srepo_server() {
+    if is_stage_completed "local_yum_server"; then
         log_info "本地YUM源配置已完成，跳过"
         return 0
     fi
 
     log_info "开始配置本地k8s repo源"
-    save_stage_status "local_yum_source" "in_progress" "配置本地k8s repo源"
+    save_stage_status "local_yum_server" "in_progress" "配置本地k8s repo源"
 
-    # 1. 将01.rpm_package/k8srepo_kylinos_sp3_amd.tar 分发至registry服务器的/var/www/html/下
-    log_info "第一步: 分发YUM源包到registry服务器"
+    # 直接在本机执行01.yum.sh脚本配置YUM源
+    log_info "在本机执行YUM源配置脚本"
+
     local yum_source_tar="$data_path/01.rpm_package/k8srepo_kylinos_sp3_amd.tar.gz"
 
     if [ ! -f "$yum_source_tar" ]; then
         log_error "YUM源包不存在: $yum_source_tar"
-        save_stage_status "local_yum_source" "failed" "YUM源包不存在"
+        save_stage_status "local_yum_server" "failed" "YUM源包不存在"
         return 1
     fi
 
-    # 分发到所有registry服务器
-    local failed_registries=()
-    for registry_ip in "${registry_ips[@]}"; do
-        log_info "分发YUM源包到registry服务器: $registry_ip"
-
-        # 确保远程/var/www/html目录存在
-        if ! ssh_execute_check "$registry_ip" "mkdir -p /var/www/html" "创建/var/www/html目录"; then
-            log_error "在registry服务器 $registry_ip 创建/var/www/html目录失败"
-            failed_registries+=("$registry_ip")
-            continue
-        fi
-
-        # 分发tar包到/var/www/html/目录
-        if scp "$yum_source_tar" "root@$registry_ip:/var/www/html/k8srepo_kylinos_sp3_amd.tar"; then
-            log_success "YUM源包分发成功: $registry_ip"
-        else
-            log_error "YUM源包分发失败: $registry_ip"
-            failed_registries+=("$registry_ip")
-        fi
-    done
-
-    if [ ${#failed_registries[@]} -ne 0 ]; then
-        log_error "部分registry服务器分发失败: ${failed_registries[*]}"
-        save_stage_status "local_yum_source" "failed" "YUM源包分发失败"
+    if bash "installscript/01.yum.sh" "$yum_source_tar"; then
+        log_success "本地YUM源配置成功"
+        save_stage_status "local_yum_server" "success" "本地YUM源配置完成"
+        return 0
+    else
+        log_error "本地YUM源配置失败"
+        save_stage_status "local_yum_server" "failed" "本地YUM源配置失败"
         return 1
     fi
+}
 
-    # 2. 在registry服务器上执行01.yum.sh安装yum源
-    log_info "第二步: 在registry服务器上安装YUM源"
-
-    # 在每个registry服务器上执行yum源安装
-    local failed_installations=()
-    for registry_ip in "${registry_ips[@]}"; do
-        log_info "在registry服务器 $registry_ip 安装YUM源"
-
-        # 使用ssh_execute_script执行01.yum.sh脚本 (参数1: tar包文件名)
-        if ssh_execute_script "$registry_ip" "installscript/01.yum.sh" "k8srepo_kylinos_sp3_amd.tar" "安装YUM源"; then
-            log_success "YUM源安装成功: $registry_ip"
-        else
-            log_error "YUM源安装失败: $registry_ip"
-            failed_installations+=("$registry_ip")
-        fi
-    done
-
-    if [ ${#failed_installations[@]} -ne 0 ]; then
-        log_error "部分registry服务器YUM源安装失败: ${failed_installations[*]}"
-        save_stage_status "local_yum_source" "failed" "YUM源安装失败"
-        return 1
+configure_k8srepo_client() {
+    if is_stage_completed "local_yum_client"; then
+        log_info "本地YUM客户端配置已完成，跳过"
+        return 0
     fi
+
+    log_info "开始配置本地k8s repo客户端"
+    save_stage_status "local_yum_client" "in_progress" "配置本地k8s repo客户端"
 
     # 3. 在其他服务器上执行01.yum_client.sh创建k8s-http.repo文件
-    log_info "第三步: 在其他服务器上配置YUM客户端"
+    log_info "第一步: 在其他服务器上配置YUM客户端"
 
-    # 分发01.yum_client.sh脚本到所有非registry节点
+    # 分发01.yum_client.sh脚本到所有非本机节点
     local client_nodes=()
     for node_ip in "${all_nodes[@]}"; do
-        local is_registry=false
-        for registry_ip in "${registry_ips[@]}"; do
-            if [ "$node_ip" = "$registry_ip" ]; then
-                is_registry=true
-                break
-            fi
-        done
-        if [ "$is_registry" = false ]; then
+        local is_master1=false
+        if [ "$node_ip" = "$k8sc1_ip" ]; then
+            is_master1=true
+            break
+        fi
+        if [ "$is_master1" = false ]; then
             client_nodes+=("$node_ip")
         fi
     done
@@ -1815,6 +1848,7 @@ configure_k8srepo_source() {
         log_info "在 ${#client_nodes[@]} 个客户端节点配置YUM源"
 
         # 在客户端节点上执行01.yum_client.sh
+        
         local failed_client_configurations=()
         for client_ip in "${client_nodes[@]}"; do
             log_info "在客户端节点 $client_ip 配置YUM源"
@@ -1830,7 +1864,7 @@ configure_k8srepo_source() {
 
         if [ ${#failed_client_configurations[@]} -ne 0 ]; then
             log_error "部分客户端节点YUM配置失败: ${failed_client_configurations[*]}"
-            save_stage_status "local_yum_source" "failed" "YUM客户端配置失败"
+            save_stage_status "local_yum_client" "failed" "YUM客户端配置失败"
             return 1
         fi
     else
@@ -1838,7 +1872,7 @@ configure_k8srepo_source() {
     fi
 
     # 4. 验证：执行yum search kubelet，有结果打印出来则为成功
-    log_info "第四步: 验证YUM源安装结果"
+    log_info "第二步: 验证YUM源安装结果"
 
     local failed_validations=()
 
@@ -1886,12 +1920,12 @@ configure_k8srepo_source() {
 
     # 检查验证结果
     if [ ${#failed_validations[@]} -eq 0 ]; then
-        save_stage_status "local_yum_source" "success" "本地YUM源配置完成 (${#registry_ips[@]} 个registry服务器)"
-        log_success "所有registry服务器YUM源配置和验证完成"
+        save_stage_status "local_yum_client" "success" "本地YUM客户端配置完成 (${#registry_ips[@]} 个registry服务器, ${#client_nodes[@]} 个客户端节点)"
+        log_success "所有服务器YUM源配置和验证完成"
         return 0
     else
-        log_error "部分registry服务器YUM源验证失败: ${failed_validations[*]}"
-        save_stage_status "local_yum_source" "failed" "YUM源验证失败"
+        log_error "部分服务器YUM源验证失败: ${failed_validations[*]}"
+        save_stage_status "local_yum_client" "failed" "YUM源验证失败"
         return 1
     fi
 }
@@ -2320,30 +2354,6 @@ configure_nfs_storage() {
     log_info "  存储路径: $nfs_path"
     log_info "  存储类: $storage_class"
 
-    # 1. 复制helm工具到本机/usr/local/bin
-    log_info "安装helm工具到本机"
-    if [ ! -f "tools/helm-amd" ]; then
-        log_error "helm工具不存在: tools/helm-amd"
-        save_stage_status "nfs_storage" "failed" "helm工具不存在"
-        return 1
-    fi
-
-    cp "tools/helm-amd" "/usr/local/bin/helm"
-    if [ $? -ne 0 ]; then
-        log_error "helm工具复制到本机失败"
-        save_stage_status "nfs_storage" "failed" "helm工具复制失败"
-        return 1
-    fi
-
-    chmod +x /usr/local/bin/helm
-    if [ $? -ne 0 ]; then
-        log_error "helm工具权限设置失败"
-        save_stage_status "nfs_storage" "failed" "helm工具权限设置失败"
-        return 1
-    fi
-
-    log_success "helm工具安装到本机成功"
-
     # 2. 在NFS服务器端配置NFS服务
     log_info "配置NFS服务器端: $nfs_server_ip"
     if ssh_execute_script "$nfs_server_ip" "installscript/09.nfs_server.sh" "$nfs_path" "配置NFS服务器"; then
@@ -2469,6 +2479,12 @@ main() {
 
     log_info "开始 KubeEasy Kubernetes 集群安装"
 
+    log_info "第一步: 配置本地yum源"
+    if ! configure_k8srepo_server; then
+        log_error "安装失败在步骤: 配置SSH免密登录"
+        exit 1
+    fi
+
     # 环境检查
     log_info "第一步: 环境检查和工具安装"
     if ! check_system_environment; then
@@ -2481,11 +2497,6 @@ main() {
 
     # 初始化节点变量
     initialize_node_variables
-    # 验证配置
-    validate_config
-
-    # 初始化hosts文件
-    initialize_hosts_file
 
     # 执行安装步骤
     log_info "第二步: 配置SSH免密登录"
@@ -2496,7 +2507,7 @@ main() {
 
     # 配置本地k8s repo源
     log_info "检查和配置本地k8s repo源"
-    if ! configure_k8srepo_source; then
+    if ! configure_k8srepo_client; then
         log_error "安装失败在步骤: 配置本地k8s repo源"
         exit 1
     fi

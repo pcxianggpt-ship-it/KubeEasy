@@ -10,17 +10,15 @@ fi
 repo_source_name="$1"
 
 # 1. 验证/var/www/html/$1文件是否存在
-if [ ! -f "/var/www/html/$repo_source_name" ]; then
-    echo "【ERROR】: YUM源文件不存在: /var/www/html/$repo_source_name"
+if [ ! -f "$repo_source_name" ]; then
+    echo "【ERROR】: YUM源文件不存在: $repo_source_name"
     exit 1
 fi
 
 echo "【INFO】: 找到YUM源文件: /var/www/html/$repo_source_name"
 
 
-
-cd  /var/www/html/
-tar -zxf $repo_source_name
+tar -zxf $repo_source_name -C /var/www/html/
 
 # 2. 添加.repo文件
 if [ ! -s "/etc/yum.repos.d/k8s.repo" ]; then
