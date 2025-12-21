@@ -2414,9 +2414,9 @@ configure_nfs_storage() {
 
     # 使用helm安装NFS provisioner
     log_info "使用helm chart安装NFS provisioner"
-    if helm install "$release_name/$helm_chart_path" \
-        --namespace nfs \
-        --set image.repository="registry:5000/nfs-subdir-external-provisioner" \
+    if helm install nfs-subdir-external-provisioner "$helm_chart_path/$release_name"   \
+        --set image.repository="registry:5000/nfs/nfs-subdir-external-provisioner" \
+        --set image.tag="v4.0.2" \
         --set nfs.server="$nfs_server_ip" \
         --set nfs.path="$nfs_path" \
         --set storageClass.name="$storage_class" \
@@ -2435,7 +2435,7 @@ configure_nfs_storage() {
     local max_retries=30
 
     while [ $retry_count -lt $max_retries ] && [ "$provisioner_ready" = "false" ]; do
-        local pod_status=$(kubectl get pod -n nfs -l app=nfs-client-provisioner -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+        local pod_status=$(kubectl get pod | grep nfs-subdir-external-provisioner | awk '{print $3}'  2>/dev/null)
         if [ "$pod_status" = "Running" ]; then
             provisioner_ready=true
             log_success "NFS provisioner已就绪"
@@ -2477,12 +2477,6 @@ configure_nfs_storage() {
 main() {
     local config_file="${1:-$CONFIG_FILE}"
 
-    # 加载配置
-    load_config "$config_file"
-
-    # 初始化节点变量
-    initialize_node_variables
-
     log_info "开始 KubeEasy Kubernetes 集群安装"
 
     log_info "第一步: 配置本地yum源"
@@ -2497,6 +2491,12 @@ main() {
         log_error "环境检查失败，脚本退出"
         exit 1
     fi
+
+    # 加载配置
+    load_config "$config_file"
+
+    # 初始化节点变量
+    initialize_node_variables
 
     # 执行安装步骤
     log_info "第二步: 配置SSH免密登录"
