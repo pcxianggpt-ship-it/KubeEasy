@@ -671,11 +671,6 @@ check_system_environment() {
         return 1
     fi
 
-    # 检查并安装sshpass
-    if ! install_sshpass; then
-        log_error "sshpass工具安装失败"
-        return 1
-    fi
 
     log_success "系统环境检查通过"
     return 0
@@ -2479,12 +2474,6 @@ main() {
 
     log_info "开始 KubeEasy Kubernetes 集群安装"
 
-    log_info "第一步: 配置本地yum源"
-    if ! configure_k8srepo_server; then
-        log_error "安装失败在步骤: 配置SSH免密登录"
-        exit 1
-    fi
-
     # 环境检查
     log_info "第一步: 环境检查和工具安装"
     if ! check_system_environment; then
@@ -2492,11 +2481,18 @@ main() {
         exit 1
     fi
 
+
     # 加载配置
     load_config "$config_file"
 
     # 初始化节点变量
     initialize_node_variables
+
+    log_info "第一步: 配置本地yum源"
+    if ! configure_k8srepo_server; then
+        log_error "安装失败在步骤: 配置SSH免密登录"
+        exit 1
+    fi
 
     # 执行安装步骤
     log_info "第二步: 配置SSH免密登录"
