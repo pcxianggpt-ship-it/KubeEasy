@@ -15,8 +15,9 @@ if [ ! -f "$repo_source_name" ]; then
     exit 1
 fi
 
-echo "【INFO】: 找到YUM源文件: /var/www/html/$repo_source_name"
+echo "【INFO】: 找到YUM源文件: $repo_source_name"
 
+mkdir -p /var/www/html/
 
 tar -zxf $repo_source_name -C /var/www/html/
 

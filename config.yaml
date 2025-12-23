@@ -6,7 +6,7 @@
 #=============================================================================
 cluster:
   name: "kubernetes"
-  version: "v1.23.17"  # 选择 "v1.23.17" 或 "v1.30.14"
+  version: "v1.30.14"  # 选择 "v1.23.17" 或 "v1.30.14"
   dualStack: "N"  # 是否部署双栈网络，N为ipv4  ，Y为ipv6+ipv4
   network:
     pod_subnet: "10.244.0.0/16"
@@ -29,27 +29,30 @@ servers:
 
   # 控制平面节点
   master:
-    - ip: "192.168.62.171"
+    - ip: "192.168.0.18"
       hostname: "k8sc1"    # 可选：不设置则自动生成 k8sc1, k8sc2, k8sc3...
-    - ip: "192.168.62.172"
-      hostname: "k8sc2"    # 自定义主机名
-    - ip: "192.168.62.173"
-      hostname: "k8sc3"    # 自定义主机名
+      ipv6: "fd00:244::18"
+    # - ip: "192.168.62.172"
+    #   hostname: "k8sc2"    # 自定义主机名
+    # - ip: "192.168.62.173"
+    #   hostname: "k8sc3"    # 自定义主机名
 
   # 工作节点
   workers:
-    - ip: "192.168.62.174"
+    - ip: "192.168.0.20"
       hostname: "k8sw1"    # 自定义主机名
-    - ip: "192.168.62.175"
+      ipv6: "fd00:244::20"
+    - ip: "192.168.0.22"
       hostname: "k8sw2"    # 自定义主机名
-    - ip: "192.168.62.176"
-      hostname: "k8sw3"    # 自定义主机名
-    - ip: "192.168.62.188"
-      hostname: "k8sw4"    # 自定义主机名
+      ipv6: "fd00:244::22"
+    # - ip: "192.168.62.176"
+    #   hostname: "k8sw3"    # 自定义主机名
+    # - ip: "192.168.62.188"
+    #   hostname: "k8sw4"    # 自定义主机名
 
   # 独立镜像仓库节点 (可选)
   registry:
-    - ip: "192.168.63.184"
+    - ip: "192.168.0.18"
       hostname: "registry"  # 自定义主机名，默认为 "registry"
 
 #=============================================================================
@@ -57,7 +60,7 @@ servers:
 #=============================================================================
 system:
   # DNS服务器
-  dns_servers: ["192.168.62.1"]
+  dns_servers: ["192.168.0.1"]
 
   # 工作目录
   work_dir: "/data"
@@ -66,7 +69,7 @@ system:
   data_path: "/root/k8s"
 
   # 节点密码 (用于SSH免密登录配置)
-  node_password: "your_node_password_here"
+  node_password: "Kylin123123"
 
   # 基础配置
   disable_swap: true
@@ -99,11 +102,8 @@ container_runtime:
 #=============================================================================
 registry:
   enable: true
-  ip: "192.168.63.184"
+  ip: "192.168.0.18"
   port: "5000"
-  auth: true
-  username: "amarsoft"
-  password: "amarsoft@123"
   ui_port: "5080"
 
 #=============================================================================
@@ -113,7 +113,7 @@ storage:
   # NFS存储配置
   nfs:
     enable: true
-    serverip: "192.168.62.174"
+    serverip: "192.168.0.18"
     path: "/data/nfs_root"
 
   # 存储类配置

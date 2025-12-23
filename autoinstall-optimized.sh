@@ -42,6 +42,21 @@ load_config() {
 
     # 使用yq加载配置变量，如果没有yq则使用默认值
     if command -v yq >/dev/null 2>&1; then
+        # 获取系统架构
+        export arch=$(uname -m)
+        case "$arch" in
+            "x86_64")
+                export arch_type="amd64"
+                ;;
+            "aarch64"|"arm64")
+                export arch_type="arm64"
+                ;;
+            *)
+                log_error "不支持的系统架构: $arch"
+                exit 1
+                ;;
+        esac
+
         # 加载基本路径配置
         export data_path=$(yq eval '.system.data_path // "/data/k8s_install"' "$config_file" | tr -d '"')
         export work_dir=$(yq eval '.system.work_dir // "/data"' "$config_file" | tr -d '"')
@@ -51,9 +66,11 @@ load_config() {
         export registry_port=$(yq eval '.registry.port' "$config_file" | tr -d '"')
         export registry_user=$(yq eval '.registry.username' "$config_file" | tr -d '"')
         export registry_passwd=$(yq eval '.registry.password' "$config_file" | tr -d '"')
+        export registry_auth=$(yq eval '.registry.auth // "no"' "$config_file" 2>/dev/null | tr -d '"')
 
         # 加载其他系统配置
         export dns_ip=$(yq eval '.system.dns_servers[0] // "192.168.62.1"' "$config_file" | tr -d '"')
+        export node_password=$(yq eval '.system.node_password // ""' "$config_file" | tr -d '"')
 
         # 加载K8s集群配置
         export k8s_version=$(yq eval '.cluster.version' "$config_file" | tr -d '"')
@@ -66,7 +83,90 @@ load_config() {
         # 获取k8sc1的IP（第一个master节点）
         export k8sc1_ip=$(yq eval '.servers.master[0].ip' "$config_file" | tr -d '"')
 
+        # 加载存储配置
+        export nfs_enable=$(yq eval '.storage.nfs.enable // "false"' "$config_file" 2>/dev/null | tr -d '"')
+        export nfs_server_ip=$(yq eval '.storage.nfs.server_ip' "$config_file" 2>/dev/null | tr -d '"')
+        export nfs_path=$(yq eval '.storage.nfs.path // "/data/nfs_root"' "$config_file" 2>/dev/null | tr -d '"')
+        export storage_class=$(yq eval '.storage.storage_class // "nfs-client"' "$config_file" 2>/dev/null | tr -d '"')
+
+        # 初始化节点数组
+        master_ips=()
+        worker_ips=()
+        registry_ips=()
+        k8s_nodes=()
+        all_nodes=()
+
+        # 声明主机名关联数组
+        declare -gA master_hostnames
+        declare -gA worker_hostnames
+        declare -gA registry_hostnames
+
+        # 声明IPv6地址关联数组
+        declare -gA master_ipv6
+        declare -gA worker_ipv6
+        declare -gA registry_ipv6
+
+        # 读取控制节点配置
+        local master_count=$(yq eval '.servers.master | length' "$config_file")
+        for ((i=0; i<master_count; i++)); do
+            local ip=$(yq eval ".servers.master[$i].ip" "$config_file")
+            local hostname=$(yq eval ".servers.master[$i].hostname" "$config_file" | tr -d '"')
+            local ipv6_addr=$(yq eval ".servers.master[$i].ipv6_addr // \"\"" "$config_file" 2>/dev/null | tr -d '"')
+
+            master_ips+=("$ip")
+            k8s_nodes+=("$ip")
+            all_nodes+=("$ip")
+
+            if [ "$hostname" != "null" ] && [ -n "$hostname" ]; then
+                master_hostnames["$ip"]="$hostname"
+            fi
+            if [ "$ipv6_addr" != "null" ] && [ -n "$ipv6_addr" ]; then
+                master_ipv6["$ip"]="$ipv6_addr"
+            fi
+        done
+
+        # 读取工作节点配置
+        local worker_count=$(yq eval '.servers.workers | length' "$config_file")
+        for ((i=0; i<worker_count; i++)); do
+            local ip=$(yq eval ".servers.workers[$i].ip" "$config_file")
+            local hostname=$(yq eval ".servers.workers[$i].hostname" "$config_file" | tr -d '"')
+            local ipv6_addr=$(yq eval ".servers.workers[$i].ipv6_addr // \"\"" "$config_file" 2>/dev/null | tr -d '"')
+
+            worker_ips+=("$ip")
+            k8s_nodes+=("$ip")
+            all_nodes+=("$ip")
+
+            if [ "$hostname" != "null" ] && [ -n "$hostname" ]; then
+                worker_hostnames["$ip"]="$hostname"
+            fi
+            if [ "$ipv6_addr" != "null" ] && [ -n "$ipv6_addr" ]; then
+                worker_ipv6["$ip"]="$ipv6_addr"
+            fi
+        done
+
+        # 读取镜像仓库节点配置
+        local registry_count=$(yq eval '.servers.registry | length' "$config_file")
+        for ((i=0; i<registry_count; i++)); do
+            local ip=$(yq eval ".servers.registry[$i].ip" "$config_file")
+            local hostname=$(yq eval ".servers.registry[$i].hostname" "$config_file" | tr -d '"')
+            local ipv6_addr=$(yq eval ".servers.registry[$i].ipv6_addr // \"\"" "$config_file" 2>/dev/null | tr -d '"')
+
+            registry_ips+=("$ip")
+            all_nodes+=("$ip")
+
+            if [ "$hostname" != "null" ] && [ -n "$hostname" ]; then
+                registry_hostnames["$ip"]="$hostname"
+            fi
+            if [ "$ipv6_addr" != "null" ] && [ -n "$ipv6_addr" ]; then
+                registry_ipv6["$ip"]="$ipv6_addr"
+            fi
+        done
+
+        # 导出数组变量供其他函数使用
+        export master_ips worker_ips registry_ips k8s_nodes all_nodes
+
         log_info "配置加载完成:"
+        log_info "  系统架构: $arch ($arch_type)"
         log_info "  data_path: $data_path"
         log_info "  registry_ip: $registry_ip:$registry_port"
         log_info "  dns_ip: $dns_ip"
@@ -75,6 +175,12 @@ load_config() {
         log_info "  service_subnet: $k8s_service_subnet"
         log_info "  dual_stack: $DUAL_STACK"
         log_info "  k8sc1_ip: $k8sc1_ip"
+        log_info "  控制节点(master_ips): ${#master_ips[@]} 个"
+        log_info "  工作节点(worker_ips): ${#worker_ips[@]} 个"
+        log_info "  K8S节点(k8s_nodes): ${#k8s_nodes[@]} 个"
+        log_info "  镜像仓库节点: ${#registry_ips[@]} 个"
+        log_info "  总节点数: ${#all_nodes[@]} 个"
+        log_info "  NFS存储: $nfs_enable (服务器: $nfs_server_ip, 路径: $nfs_path)"
     else
         log_error "yq工具未安装，无法解析config.yaml，请先安装yq"
         exit 1
@@ -529,27 +635,11 @@ install_yq() {
 
     log_info "开始安装yq工具..."
 
-    # 获取系统架构
-    local arch=$(uname -m)
-    local yq_arch=""
-
-    case "$arch" in
-        "x86_64")
-            yq_arch="amd64"
-            ;;
-        "aarch64"|"arm64")
-            yq_arch="arm64"
-            ;;
-        *)
-            log_error "不支持的系统架构: $arch"
-            return 1
-            ;;
-    esac
-
+    # 使用全局变量arch_type（已在load_config中加载）
     # 优先从本地工具目录安装
-    if [ -f "tools/yq_linux_${yq_arch}" ]; then
+    if [ -f "tools/yq_linux_${arch_type}" ]; then
         log_info "从本地工具目录安装yq"
-        cp "tools/yq_linux_${yq_arch}" /usr/local/bin/yq
+        cp "tools/yq_linux_${arch_type}" /usr/local/bin/yq
         chmod +x /usr/local/bin/yq
 
         # 验证安装
@@ -562,7 +652,7 @@ install_yq() {
             return 1
         fi
     else
-        log_error "找不到本地yq工具文件: tools/yq_linux_${yq_arch}"
+        log_error "找不到本地yq工具文件: tools/yq_linux_${arch_type}"
         log_error "请确保yq工具文件存在或手动安装yq"
         return 1
     fi
@@ -577,10 +667,8 @@ install_helm() {
 
     log_info "开始安装helm工具..."
 
-    # 获取系统架构
-    local arch=$(uname -m)
+    # 使用全局变量arch，转换为helm需要的格式
     local helm_arch=""
-
     case "$arch" in
         "x86_64")
             helm_arch="amd"
@@ -640,7 +728,7 @@ check_system_environment() {
         log_info "无法检测操作系统信息"
     fi
 
-    # 检查系统架构
+    # 检查系统架构（仅用于日志显示，全局arch变量将在load_config中设置）
     local arch=$(uname -m)
     log_info "系统架构: $arch"
 
@@ -817,56 +905,11 @@ generate_hosts_content() {
     echo "$hosts_content"
 }
 
-# 初始化节点变量
+# initialize_node_variables功能已合并到load_config()中
+# 此函数保留为兼容性，直接返回成功
 initialize_node_variables() {
-    local config_file="$CONFIG_FILE"
-
-    if ! command -v yq >/dev/null 2>&1; then
-        log_error "yq工具未安装，无法初始化节点变量"
-        return 1
-    fi
-
-    log_info "初始化节点变量..."
-
-    # 初始化数组变量
-    master_ips=()
-    worker_ips=()
-    registry_ips=()
-    k8s_nodes=()
-    all_nodes=()
-
-    # 读取控制节点IP
-    local master_count=$(yq eval '.servers.master | length' "$config_file")
-    for ((i=0; i<master_count; i++)); do
-        master_ips+=($(yq eval ".servers.master[$i].ip" "$config_file"))
-        k8s_nodes+=($(yq eval ".servers.master[$i].ip" "$config_file"))
-        all_nodes+=($(yq eval ".servers.master[$i].ip" "$config_file"))
-    done
-
-    # 读取工作节点IP
-    local worker_count=$(yq eval '.servers.workers | length' "$config_file")
-    for ((i=0; i<worker_count; i++)); do
-        worker_ips+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
-        k8s_nodes+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
-        all_nodes+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
-    done
-
-    # 读取镜像仓库节点IP
-    local registry_count=$(yq eval '.servers.registry | length' "$config_file")
-    for ((i=0; i<registry_count; i++)); do
-        registry_ips+=($(yq eval ".servers.registry[$i].ip" "$config_file"))
-        all_nodes+=($(yq eval ".servers.registry[$i].ip" "$config_file"))
-    done
-
-    # 导出数组变量供其他函数使用
-    export master_ips worker_ips registry_ips k8s_nodes all_nodes
-
-    log_info "节点变量初始化完成:"
-    log_info "  控制节点(master_ips): ${#master_ips[@]} 个"
-    log_info "  工作节点(worker_ips): ${#worker_ips[@]} 个"
-    log_info "  K8S节点(k8s_nodes): ${#k8s_nodes[@]} 个"
-    log_info "  镜像仓库节点: ${#registry_ips[@]} 个"
-    log_info "  总节点数: ${#all_nodes[@]} 个"
+    # 节点变量已在load_config中初始化
+    return 0
 }
 
 # 安装sshpass工具
@@ -957,13 +1000,9 @@ setup_ssh_keyless() {
     log_info "开始配置SSH免密登录"
     save_stage_status "ssh_keyless" "in_progress" "配置SSH免密登录"
 
-    # 从配置文件读取节点密码
-    local config_file="$CONFIG_FILE"
-    local node_password=$(yq eval '.system.node_password // ""' "$config_file" | tr -d '"')
-
+    # 使用全局变量node_password（已在load_config中加载）
     if [ -z "$node_password" ]; then
         log_info "未在配置文件中找到节点密码，尝试手动交互方式"
-        node_password=""
     else
         log_info "从配置文件读取到节点密码"
     fi
@@ -1097,32 +1136,18 @@ configure_hostname_hosts() {
         return 0
     fi
 
-    local config_file="$CONFIG_FILE"
-
-    log_info "开始配置主机名和hosts文件 (基于配置: $config_file)"
+    log_info "开始配置主机名和hosts文件"
     save_stage_status "hostname_hosts" "in_progress" "配置主机名和hosts"
 
-    # 检查配置文件和yq工具
-    if [ ! -f "$config_file" ]; then
-        log_error "配置文件不存在: $config_file"
-        save_stage_status "hostname_hosts" "failed" "配置文件不存在"
-        return 1
-    fi
-
-    # 使用yq直接读取配置信息并生成hosts文件内容
-    log_info "使用yq解析配置文件..."
-
-    # 生成hosts文件内容
+    # 生成hosts文件内容（使用全局变量）
     local hosts_content="127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
 ::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
 "
 
-    # 读取控制节点信息并添加到hosts文件
-    local master_count=$(yq eval '.servers.master | length' "$config_file")
-    for ((i=0; i<master_count; i++)); do
-        local ip=$(yq eval ".servers.master[$i].ip" "$config_file")
-        local hostname=$(yq eval ".servers.master[$i].hostname" "$config_file" | tr -d '"')
-        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+    # 添加控制节点到hosts文件
+    for ip in "${master_ips[@]}"; do
+        local hostname="${master_hostnames[$ip]}"
+        if [ -z "$hostname" ]; then
             log_error "控制节点 $ip 缺少hostname配置，请检查config.yaml"
             continue
         fi
@@ -1130,12 +1155,10 @@ configure_hostname_hosts() {
 "
     done
 
-    # 读取工作节点信息并添加到hosts文件
-    local worker_count=$(yq eval '.servers.workers | length' "$config_file")
-    for ((i=0; i<worker_count; i++)); do
-        local ip=$(yq eval ".servers.workers[$i].ip" "$config_file")
-        local hostname=$(yq eval ".servers.workers[$i].hostname" "$config_file" | tr -d '"')
-        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+    # 添加工作节点到hosts文件
+    for ip in "${worker_ips[@]}"; do
+        local hostname="${worker_hostnames[$ip]}"
+        if [ -z "$hostname" ]; then
             log_error "工作节点 $ip 缺少hostname配置，请检查config.yaml"
             continue
         fi
@@ -1143,12 +1166,10 @@ configure_hostname_hosts() {
 "
     done
 
-    # 读取镜像仓库节点信息并添加到hosts文件
-    local registry_count=$(yq eval '.servers.registry | length' "$config_file")
-    for ((i=0; i<registry_count; i++)); do
-        local ip=$(yq eval ".servers.registry[$i].ip" "$config_file")
-        local hostname=$(yq eval ".servers.registry[$i].hostname" "$config_file" | tr -d '"')
-        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
+    # 添加镜像仓库节点到hosts文件
+    for ip in "${registry_ips[@]}"; do
+        local hostname="${registry_hostnames[$ip]}"
+        if [ -z "$hostname" ]; then
             log_error "镜像仓库节点 $ip 缺少hostname配置，请检查config.yaml"
             continue
         fi
@@ -1166,26 +1187,15 @@ configure_hostname_hosts() {
     echo "================================"
 
     # 统计节点数量
-    local total_nodes=$((master_count + worker_count ))
+    local total_nodes=$((${#master_ips[@]} + ${#worker_ips[@]}))
     log_info "发现服务器总数: $total_nodes"
-    log_info "控制节点: $master_count 个"
-    log_info "工作节点: $worker_count 个"
+    log_info "控制节点: ${#master_ips[@]} 个"
+    log_info "工作节点: ${#worker_ips[@]} 个"
 
-    # 合并所有节点IP用于分发hosts文件
-    local all_ips=()
-
-    # 收集所有节点IP
-    for ((i=0; i<master_count; i++)); do
-        all_ips+=($(yq eval ".servers.master[$i].ip" "$config_file"))
-    done
-    for ((i=0; i<worker_count; i++)); do
-        all_ips+=($(yq eval ".servers.workers[$i].ip" "$config_file"))
-    done
-
-    # 分发hosts文件到所有节点
+    # 分发hosts文件到所有k8s节点
     log_info "分发hosts文件到所有节点..."
     local failed_hosts=()
-    for server_ip in "${all_ips[@]}"; do
+    for server_ip in "${k8s_nodes[@]}"; do
         if distribute_file "$temp_hosts_file" "/etc/hosts" "$server_ip"; then
             log_success "hosts文件分发成功: $server_ip"
         else
@@ -1196,43 +1206,41 @@ configure_hostname_hosts() {
 
     # 配置控制节点主机名
     log_info "配置控制节点主机名..."
-    for ((i=0; i<master_count; i++)); do
-        local server_ip=$(yq eval ".servers.master[$i].ip" "$config_file")
-        local hostname=$(yq eval ".servers.master[$i].hostname" "$config_file" | tr -d '"')
+    for ip in "${master_ips[@]}"; do
+        local hostname="${master_hostnames[$ip]}"
 
-        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
-            log_error "跳过控制节点 $server_ip：缺少hostname配置"
-            failed_hosts+=("$server_ip")
+        if [ -z "$hostname" ]; then
+            log_error "跳过控制节点 $ip：缺少hostname配置"
+            failed_hosts+=("$ip")
             continue
         fi
 
-        log_info "配置控制节点: $server_ip -> $hostname"
-        if ssh_execute_check "$server_ip" "hostnamectl set-hostname $hostname" "设置主机名: $hostname"; then
-            log_success "控制节点主机名设置成功: $server_ip -> $hostname"
+        log_info "配置控制节点: $ip -> $hostname"
+        if ssh_execute_check "$ip" "hostnamectl set-hostname $hostname" "设置主机名: $hostname"; then
+            log_success "控制节点主机名设置成功: $ip -> $hostname"
         else
-            log_error "控制节点主机名设置失败: $server_ip -> $hostname"
-            failed_hosts+=("$server_ip")
+            log_error "控制节点主机名设置失败: $ip -> $hostname"
+            failed_hosts+=("$ip")
         fi
     done
 
     # 配置工作节点主机名
     log_info "配置工作节点主机名..."
-    for ((i=0; i<worker_count; i++)); do
-        local server_ip=$(yq eval ".servers.workers[$i].ip" "$config_file")
-        local hostname=$(yq eval ".servers.workers[$i].hostname" "$config_file" | tr -d '"')
+    for ip in "${worker_ips[@]}"; do
+        local hostname="${worker_hostnames[$ip]}"
 
-        if [ "$hostname" = "null" ] || [ -z "$hostname" ]; then
-            log_error "跳过工作节点 $server_ip：缺少hostname配置"
-            failed_hosts+=("$server_ip")
+        if [ -z "$hostname" ]; then
+            log_error "跳过工作节点 $ip：缺少hostname配置"
+            failed_hosts+=("$ip")
             continue
         fi
 
-        log_info "配置工作节点: $server_ip -> $hostname"
-        if ssh_execute_check "$server_ip" "hostnamectl set-hostname $hostname" "设置主机名: $hostname"; then
-            log_success "工作节点主机名设置成功: $server_ip -> $hostname"
+        log_info "配置工作节点: $ip -> $hostname"
+        if ssh_execute_check "$ip" "hostnamectl set-hostname $hostname" "设置主机名: $hostname"; then
+            log_success "工作节点主机名设置成功: $ip -> $hostname"
         else
-            log_error "工作节点主机名设置失败: $server_ip -> $hostname"
-            failed_hosts+=("$server_ip")
+            log_error "工作节点主机名设置失败: $ip -> $hostname"
+            failed_hosts+=("$ip")
         fi
     done
 
@@ -1262,22 +1270,39 @@ configure_environment() {
     log_info "开始配置环境变量"
     save_stage_status "environment" "in_progress" "配置环境变量"
 
-    # 为每个节点配置环境变量，传入对应的IPv6地址
+    # 为每个节点配置环境变量，使用全局IPv6变量
     local failed_nodes=()
 
     for server_ip in "${k8s_nodes[@]}"; do
         log_info "为节点 $server_ip 配置环境变量"
 
-        # 获取该节点对应的IPv6地址
-        local ipv6_addr=$(yq '[.servers.master[], .servers.workers[]] | .[] | select(.ip == "'"$server_ip"'") | .ipv6' $config_file)
+        # 从全局关联数组获取该节点对应的IPv6地址
+        local ipv6_addr=""
+
+        # 检查是否是master节点
+        for master_ip in "${master_ips[@]}"; do
+            if [ "$master_ip" = "$server_ip" ]; then
+                ipv6_addr="${master_ipv6[$server_ip]}"
+                break
+            fi
+        done
+
+        # 检查是否是worker节点
+        if [ -z "$ipv6_addr" ]; then
+            for worker_ip in "${worker_ips[@]}"; do
+                if [ "$worker_ip" = "$server_ip" ]; then
+                    ipv6_addr="${worker_ipv6[$server_ip]}"
+                    break
+                fi
+            done
+        fi
 
         if [ -z "$ipv6_addr" ]; then
             log_error "无法获取节点 $server_ip 的IPv6地址，使用默认值"
-            exit 1
+            ipv6_addr="fd00:42::171"
         fi
 
         log_info "节点 $server_ip 使用IPv6地址: $ipv6_addr"
-
 
         # 执行环境配置脚本，传入data_path和IPv6地址
         if ssh_execute_script "$server_ip" "installscript/01.set-env.sh" "$data_path $ipv6_addr" "配置环境变量"; then
@@ -1301,65 +1326,26 @@ configure_environment() {
     fi
 }
 
-# 获取服务器对应的IPv6地址
+# get_server_ipv6_address功能已合并到load_config()中
+# 此函数保留为兼容性，直接返回默认值
 get_server_ipv6_address() {
     local server_ip="$1"
-    local config_file="$CONFIG_FILE"
 
-    # 检查yq工具是否可用
-    if ! command -v yq >/dev/null 2>&1; then
-        log_warning "yq工具未安装，使用默认IPv6地址"
-        echo "fd00:42::171"
-        return 0
+    # 从全局关联数组获取IPv6地址
+    local ipv6_addr="${master_ipv6[$server_ip]}"
+    if [ -z "$ipv6_addr" ]; then
+        ipv6_addr="${worker_ipv6[$server_ip]}"
+    fi
+    if [ -z "$ipv6_addr" ]; then
+        ipv6_addr="${registry_ipv6[$server_ip]}"
     fi
 
-    # 检查配置文件是否存在
-    if [ ! -f "$config_file" ]; then
-        log_warning "配置文件不存在: $config_file，使用默认IPv6地址"
+    # 如果找不到，使用默认值
+    if [ -z "$ipv6_addr" ]; then
         echo "fd00:42::171"
-        return 0
+    else
+        echo "$ipv6_addr"
     fi
-
-    # 根据服务器IP查找对应的IPv6地址
-    # 首先检查控制节点
-    local master_count=$(yq eval '.servers.master | length' "$config_file" 2>/dev/null)
-    for ((i=0; i<master_count; i++)); do
-        local ip=$(yq eval ".servers.master[$i].ip" "$config_file" 2>/dev/null | tr -d '"')
-        if [ "$ip" = "$server_ip" ]; then
-            # 尝试获取该节点的IPv6地址配置
-            local ipv6_addr=$(yq eval ".servers.master[$i].ipv6_addr // \"fd00:42::$((i+1))\"" "$config_file" 2>/dev/null | tr -d '"')
-            echo "$ipv6_addr"
-            return 0
-        fi
-    done
-
-    # 然后检查工作节点
-    local worker_count=$(yq eval '.servers.workers | length' "$config_file" 2>/dev/null)
-    for ((i=0; i<worker_count; i++)); do
-        local ip=$(yq eval ".servers.workers[$i].ip" "$config_file" 2>/dev/null | tr -d '"')
-        if [ "$ip" = "$server_ip" ]; then
-            # 尝试获取该节点的IPv6地址配置
-            local ipv6_addr=$(yq eval ".servers.workers[$i].ipv6_addr // \"fd00:42::$((i+101))\"" "$config_file" 2>/dev/null | tr -d '"')
-            echo "$ipv6_addr"
-            return 0
-        fi
-    done
-
-    # 最后检查镜像仓库节点
-    local registry_count=$(yq eval '.servers.registry | length' "$config_file" 2>/dev/null)
-    for ((i=0; i<registry_count; i++)); do
-        local ip=$(yq eval ".servers.registry[$i].ip" "$config_file" 2>/dev/null | tr -d '"')
-        if [ "$ip" = "$server_ip" ]; then
-            # 尝试获取该节点的IPv6地址配置
-            local ipv6_addr=$(yq eval ".servers.registry[$i].ipv6_addr // \"fd00:42::$((i+201))\"" "$config_file" 2>/dev/null | tr -d '"')
-            echo "$ipv6_addr"
-            return 0
-        fi
-    done
-
-    # 如果找不到对应配置，使用默认值
-    log_warning "未找到节点 $server_ip 的IPv6地址配置，使用默认值"
-    echo "fd00:42::171"
 }
 
 # 配置DNS
@@ -1485,8 +1471,7 @@ install_containerd() {
 
 # 容器运行时安装函数 (根据K8s版本选择)
 install_container_runtime() {
-    # 从config.yaml读取K8s版本
-    local k8s_version=$(yq eval '.cluster.version' "$CONFIG_FILE" | tr -d '"')
+    # 使用全局变量k8s_version（已在load_config中加载）
     log_info "检测到Kubernetes版本: $k8s_version"
 
     case "$k8s_version" in
@@ -1551,7 +1536,7 @@ verify_k8s_dependency_versions() {
     fi
 
     # 验证kubeadm版本
-    local kubeadm_version=$(ssh_execute "$server" "kubeadm version 2>/dev/null | grep 'GitVersion' | awk -F'\"' '{print \$2}'" true)
+    local kubeadm_version=$(ssh_execute "$server" "kubeadm version 2>/dev/null | grep -oP 'GitVersion:\"[^\"]*\"' | sed 's/GitVersion://;s/\"//g'" true)
     if [ -n "$kubeadm_version" ]; then
         if echo "$kubeadm_version" | grep -q "$expected_kubeadm_version"; then
             log_success "节点 $server kubeadm版本正确: $kubeadm_version"
@@ -1565,7 +1550,7 @@ verify_k8s_dependency_versions() {
     fi
 
     # 验证kubectl版本
-    local kubectl_version=$(ssh_execute "$server" "kubectl version --client 2>/dev/null | grep 'GitVersion' | awk -F'\"' '{print \$2}'" true)
+    local kubectl_version=$(ssh_execute "$server" "kubectl version --client 2>/dev/null | grep 'Client Version' | awk '{print $3}'" true)
     if [ -n "$kubectl_version" ]; then
         if echo "$kubectl_version" | grep -q "$expected_kubectl_version"; then
             log_success "节点 $server kubectl版本正确: $kubectl_version"
@@ -1670,10 +1655,8 @@ install_registry() {
         return 1
     fi
 
-    # 获取系统架构
-    local arch=$(uname -m)
+    # 使用全局变量arch，转换为registry需要的格式
     local arch_type=""
-
     case "$arch" in
         "x86_64")
             arch_type="amd"
@@ -1688,7 +1671,7 @@ install_registry() {
             ;;
     esac
 
-    log_info "系统架构: $arch_type"
+    log_info "系统架构: $arch ($arch_type)"
 
     # 为每个registry服务器安装镜像仓库
     local failed_registries=()
@@ -1696,17 +1679,15 @@ install_registry() {
     for registry_ip in "${registry_ips[@]}"; do
         log_info "在镜像仓库服务器 $registry_ip 安装镜像仓库"
 
-        # 构建参数
+        # 构建参数（使用全局变量）
         local params="$registry_ip $arch_type $registry_user $registry_passwd"
 
-        # 检查是否需要加密（从配置文件读取）
-        local registry_auth=$(yq eval '.registry.auth // "no"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
-
+        # 使用全局变量registry_auth（已在load_config中加载）
         if [ "$registry_auth" = "null" ] || [ -z "$registry_auth" ]; then
-            registry_auth="no"
+            params="$params no"
+        else
+            params="$params $registry_auth"
         fi
-
-        params="$params $registry_auth"
 
         log_info "安装参数: IP=$registry_ip, 架构=$arch_type, 认证=$registry_auth"
 
@@ -1959,7 +1940,8 @@ replace_kubeadm_local() {
 
     # 替换kubeadm为支持100年证书的版本
     log_info "替换kubeadm为支持100年证书的版本..."
-    local kubeadm_100y_file="$data_path/01.rpm_package/kubeadm100y-amd"
+    # 使用全局变量arch和k8s_version构建文件路径
+    local kubeadm_100y_file="$data_path/01.rpm_package/kubeadm-$k8s_version-100y-$arch_type"
 
     if [[ -f "$kubeadm_100y_file" ]]; then
         # 复制文件并设置执行权限
@@ -2325,21 +2307,15 @@ configure_nfs_storage() {
     log_info "开始配置NFS存储"
     save_stage_status "nfs_storage" "in_progress" "配置NFS存储"
 
-    # 检查是否启用NFS存储
-    local nfs_enable=$(yq eval '.storage.nfs.enable // "false"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
+    # 使用全局变量（已在load_config中加载）
     if [ "$nfs_enable" != "true" ]; then
         log_info "NFS存储未启用，跳过配置"
         save_stage_status "nfs_storage" "success" "NFS存储未启用，跳过配置"
         return 0
     fi
 
-    # 获取NFS配置参数
-    local nfs_server_ip=$(yq eval '.storage.nfs.server_ip' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
-    local nfs_path=$(yq eval '.storage.nfs.path // "/data/nfs_root"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
-    local storage_class=$(yq eval '.storage.storage_class // "nfs-client"' "$CONFIG_FILE" 2>/dev/null | tr -d '"')
-
     if [ -z "$nfs_server_ip" ]; then
-        log_error "NFS服务器IP未配置，请检查config.yaml中的storage.nfs.serverip配置"
+        log_error "NFS服务器IP未配置，请检查config.yaml中的storage.nfs.server_ip配置"
         save_stage_status "nfs_storage" "failed" "NFS服务器IP未配置"
         return 1
     fi
@@ -2482,11 +2458,8 @@ main() {
     fi
 
 
-    # 加载配置
+    # 加载配置（包括初始化所有节点变量）
     load_config "$config_file"
-
-    # 初始化节点变量
-    initialize_node_variables
 
     log_info "第一步: 配置本地yum源"
     if ! configure_k8srepo_server; then
