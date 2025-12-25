@@ -158,7 +158,7 @@ kubernetes:
       kubeadm: "1.30.14-0"
       kubelet: "1.30.14-0"
       kubectl: "1.30.14-0"
-      cni: "1.5.1-0"
+      cni: "1.4.0"
       cri_tools: "1.30.0-0"
       pause: "3.9"
       core_dns: "v1.11.1"

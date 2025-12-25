@@ -6,6 +6,15 @@ if [ -z $1 ];then
   exit 1
 fi
 
+# 检查containerd是否已安装
+# if command -v containerd >/dev/null 2>&1; then
+#     echo "【INFO】：containerd已安装，版本: $(containerd --version)"
+#     echo "【INFO】：跳过containerd安装步骤"
+#     exit 0
+# fi
+
+echo "【INFO】：开始安装containerd..."
+
 registry=$1
 echo "镜像仓库ip为 $1"
 
@@ -21,7 +30,7 @@ mkdir -p /opt/cni/bin
 tar Cxzvf /opt/cni/bin cni-plugins-linux-amd64-v1.8.0.tgz
 #生成默认配置文件
 mkdir -p /etc/containerd
-cp config.toml /etc/containerd/config.toml
+cp config-1.7.18.toml /etc/containerd/config.toml
 #安装buildkit
 tar Cxzvf /usr/local buildkit-v0.25.2.linux-amd64.tar.gz
 #创建buildkit自启服务并启动
@@ -90,6 +99,7 @@ if [ -d "/opt/cni/bin" ] && [ "$(ls -A /opt/cni/bin)" ]; then
     echo "✓ CNI插件已安装"
 else
     echo "✗ CNI插件安装失败"
+    exit 1
 fi
 
 # 检查buildkit服务状态
@@ -97,6 +107,7 @@ if systemctl is-active --quiet buildkit; then
     echo "✓ buildkit服务运行正常"
 else
     echo "✗ buildkit服务未运行"
+    exit 1
 fi
 
 # 检查containerd配置文件
@@ -104,6 +115,7 @@ if [ -f "/etc/containerd/config.toml" ]; then
     echo "✓ containerd配置文件已创建"
 else
     echo "✗ containerd配置文件不存在"
+    exit 1
 fi
 
 # 检查镜像仓库配置
@@ -111,6 +123,7 @@ if [ -d "/etc/containerd/certs.d/$registry:5000" ] && [ -f "/etc/containerd/cert
     echo "✓ 镜像仓库配置已创建"
 else
     echo "✗ 镜像仓库配置失败"
+    exit 1
 fi
 
 echo "containerd安装验证完成"

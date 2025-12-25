@@ -2,7 +2,7 @@
 # $1: 工作目录路径
 # $2: IPv6地址（可选）
 
-DATA_PATH="$1"
+DUAL_STACK="$1"
 IPV6_ADDR="$2"
 
 ## 关闭swap
@@ -110,66 +110,71 @@ echo net.ipv6.conf.default.forwarding=1 >> /etc/sysctl.conf
 
 sysctl --system > /dev/null
 
-if lsmod | grep br_netfilter | wc -l | grep -q "1" ; then
+if lsmod | grep -q br_netfilter; then
     echo "【SUCCESS】：br_netfilter配置成功"
 else
     echo "【ERROR】：br_netfilter配置失败"
+    exit 1
 fi
-if lsmod | grep overlay | wc -l | grep -q "1" ; then
+
+if lsmod | grep -q overlay; then
     echo "【SUCCESS】：overlay配置成功"
 else
     echo "【ERROR】：overlay配置失败"
+    exit 1
 fi
 
 ## IPv6 网卡配置
-echo "开始配置IPv6网卡..."
+if [ "$DUAL_STACK" = "Y" ]; then
+    echo "双栈模式已启用，开始配置IPv6网卡..."
 
-# IPv6地址已经在脚本开头解析并存储在IPV6_ADDR变量中
-echo "使用IPv6地址: $IPV6_ADDR"
+    # IPv6地址已经在脚本开头解析并存储在IPV6_ADDR变量中
+    echo "使用IPv6地址: $IPV6_ADDR"
 
-# 获取主网卡名称
-MAIN_NIC=$(ip route | grep default | awk '{print $5}' | head -1)
-if [ -z "$MAIN_NIC" ]; then
-    # 如果无法获取默认路由的网卡，则使用第一个非lo网卡
-    MAIN_NIC=$(ip addr show | grep -E '^[0-9]+:' | grep -v lo | head -1 | awk -F': ' '{print $2}')
-fi
+    # 获取主网卡名称
+    MAIN_NIC=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [ -z "$MAIN_NIC" ]; then
+        # 如果无法获取默认路由的网卡，则使用第一个非lo网卡
+        MAIN_NIC=$(ip addr show | grep -E '^[0-9]+:' | grep -v lo | head -1 | awk -F': ' '{print $2}')
+    fi
 
-if [ -z "$MAIN_NIC" ]; then
-    echo "【ERROR】：无法获取主网卡名称，跳过IPv6配置"
-else
-    echo "检测到主网卡: $MAIN_NIC"
+    if [ -z "$MAIN_NIC" ]; then
+        echo "【ERROR】：无法获取主网卡名称，跳过IPv6配置"
+        exit 1
+    else
+        echo "检测到主网卡: $MAIN_NIC"
 
-    # 网卡配置文件路径
-    NIC_CONFIG="/etc/sysconfig/network-scripts/ifcfg-$MAIN_NIC"
+        # 网卡配置文件路径
+        NIC_CONFIG="/etc/sysconfig/network-scripts/ifcfg-$MAIN_NIC"
 
-    # 如果配置文件不存在，创建基本配置
-    if [ ! -f "$NIC_CONFIG" ]; then
-        echo "网卡配置文件不存在，创建基本配置: $NIC_CONFIG"
-        cat > "$NIC_CONFIG" << EOF
+        # 如果配置文件不存在，创建基本配置
+        if [ ! -f "$NIC_CONFIG" ]; then
+            echo "网卡配置文件不存在，创建基本配置: $NIC_CONFIG"
+            cat > "$NIC_CONFIG" << EOF
 TYPE=Ethernet
 BOOTPROTO=dhcp
 ONBOOT=yes
 EOF
-    fi
+        fi
 
-    # 备份原配置文件
-    cp "$NIC_CONFIG" "${NIC_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
+        # 备份原配置文件
+        cp "$NIC_CONFIG" "${NIC_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
 
-    # 检查IPv6配置是否已存在
-    if grep -q "IPV6INIT=yes" "$NIC_CONFIG" 2>/dev/null; then
-        echo "【INFO】：IPv6配置已存在，正在更新..."
+        # 检查IPv6配置是否已存在
+        if grep -q "IPV6INIT=yes" "$NIC_CONFIG" 2>/dev/null; then
+            echo "【INFO】：IPv6配置已存在，正在更新..."
 
-        # 更新IPv6地址配置
-        sed -i "s/^IPV6ADDR=.*/IPV6ADDR=$IPV6_ADDR/" "$NIC_CONFIG"
-        sed -i 's/^IPV6_AUTOCONF=.*/IPV6_AUTOCONF=no/' "$NIC_CONFIG"
-        sed -i 's/^IPV6_DEFROUTE=.*/IPV6_DEFROUTE=yes/' "$NIC_CONFIG"
-        sed -i 's/^IPV6_FAILURE_FATAL=.*/IPV6_FAILURE_FATAL=no/' "$NIC_CONFIG"
-        sed -i 's/^IPV6_ADDR_GEN_MODE=.*/IPV6_ADDR_GEN_MODE=none/' "$NIC_CONFIG"
-    else
-        echo "【INFO】：添加IPv6配置到网卡..."
+            # 更新IPv6地址配置
+            sed -i "s/^IPV6ADDR=.*/IPV6ADDR=$IPV6_ADDR/" "$NIC_CONFIG"
+            sed -i 's/^IPV6_AUTOCONF=.*/IPV6_AUTOCONF=no/' "$NIC_CONFIG"
+            sed -i 's/^IPV6_DEFROUTE=.*/IPV6_DEFROUTE=yes/' "$NIC_CONFIG"
+            sed -i 's/^IPV6_FAILURE_FATAL=.*/IPV6_FAILURE_FATAL=no/' "$NIC_CONFIG"
+            sed -i 's/^IPV6_ADDR_GEN_MODE=.*/IPV6_ADDR_GEN_MODE=none/' "$NIC_CONFIG"
+        else
+            echo "【INFO】：添加IPv6配置到网卡..."
 
-        # 添加IPv6配置到文件末尾
-        cat >> "$NIC_CONFIG" << EOF
+            # 添加IPv6配置到文件末尾
+            cat >> "$NIC_CONFIG" << EOF
 
 # IPv6 配置
 IPV6INIT=yes
@@ -180,21 +185,24 @@ IPV6_DEFROUTE=yes
 IPV6_FAILURE_FATAL=no
 IPV6_ADDR_GEN_MODE=none
 EOF
-    fi
+        fi
 
-    # 验证配置文件
-    if [ -f "$NIC_CONFIG" ] && grep -q "IPV6INIT=yes" "$NIC_CONFIG"; then
-        echo "【SUCCESS】：IPv6网卡配置完成"
-        echo "配置文件: $NIC_CONFIG"
-        echo "IPv6地址: $IPV6_ADDR"
+        # 验证配置文件
+        if [ -f "$NIC_CONFIG" ] && grep -q "IPV6INIT=yes" "$NIC_CONFIG"; then
+            echo "【SUCCESS】：IPv6网卡配置完成"
+            echo "配置文件: $NIC_CONFIG"
+            echo "IPv6地址: $IPV6_ADDR"
 
-        # 显示IPv6配置
-        echo "当前IPv6配置:"
-        grep IPV6 "$NIC_CONFIG"
-    else
-        echo "【ERROR】：IPv6网卡配置失败"
-        exit 1
+            # 显示IPv6配置
+            echo "当前IPv6配置:"
+            grep IPV6 "$NIC_CONFIG"
+        else
+            echo "【ERROR】：IPv6网卡配置失败"
+            exit 1
+        fi
     fi
+else
+    echo "双栈模式未启用，跳过IPv6网卡配置"
 fi
 
 # 验证sysctl参数配置
@@ -249,100 +257,107 @@ else
 fi
 
 ## 重启网络服务使IPv6配置生效
-echo "正在重启网络服务使IPv6配置生效..."
+if [ "$DUAL_STACK" = "Y" ]; then
+    echo "正在重启网络服务使IPv6配置生效..."
 
-# 重启网络服务
-systemctl restart network > /dev/null 2>&1
-if [ $? -eq 0 ]; then
-    echo "【SUCCESS】：网络服务重启成功"
-else
-    echo "【WARNING】：网络服务重启失败，尝试重启NetworkManager"
-    systemctl restart NetworkManager > /dev/null 2>&1
+    # 重启网络服务
+    systemctl restart network > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-        echo "【SUCCESS】：NetworkManager重启成功"
+        echo "【SUCCESS】：网络服务重启成功"
     else
-        echo "【ERROR】：网络服务重启失败"
-    fi
-fi
-
-# 等待网络稳定
-sleep 3
-
-## 验证IPv6配置
-echo "==================== IPv6配置验证 ===================="
-
-# 验证主网卡是否获得IPv6地址
-if [ -n "$MAIN_NIC" ]; then
-    echo "检查主网卡 $MAIN_NIC 的IPv6配置..."
-
-    # 显示网卡IPv6地址
-    ipv6_addrs=$(ip -6 addr show dev "$MAIN_NIC" | grep "inet6" | grep -v "fe80" | awk '{print $2}' | cut -d'/' -f1)
-
-    if [ -n "$ipv6_addrs" ]; then
-        echo "【SUCCESS】：主网卡已获得IPv6地址:"
-        echo "$ipv6_addrs"
-    else
-        echo "【WARNING】：主网卡未获得非链路本地IPv6地址"
-    fi
-
-    # 显示所有IPv6地址（包括链路本地）
-    echo "主网卡所有IPv6地址:"
-    ip -6 addr show dev "$MAIN_NIC" | grep "inet6" | awk '{print "  " $2}'
-
-    # 验证期望的IPv6地址是否存在
-    if [ -n "$IPV6_ADDR" ]; then
-        if ip -6 addr show dev "$MAIN_NIC" | grep -q "$IPV6_ADDR"; then
-            echo "【SUCCESS】：期望的IPv6地址 $IPV6_ADDR 已配置"
+        echo "【WARNING】：网络服务重启失败，尝试重启NetworkManager"
+        systemctl restart NetworkManager > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo "【SUCCESS】：NetworkManager重启成功"
         else
-            echo "【ERROR】：期望的IPv6地址 $IPV6_ADDR 未找到"
+            echo "【ERROR】：网络服务重启失败"
+            exit 1
         fi
     fi
-else
-    echo "【ERROR】：无法验证IPv6配置，主网卡未识别"
-fi
 
-# 验证IPv6路由
-echo "==================== IPv6路由验证 ===================="
-ipv6_routes=$(ip -6 route | grep -v "^fd00")
-if [ -n "$ipv6_routes" ]; then
-    echo "IPv6路由表:"
-    
-    echo "$ipv6_routes"
-else
-    echo "【WARNING】：未发现IPv6路由"
-fi
+    # 等待网络稳定
+    sleep 3
 
-# 验证IPv6连通性（ping网关）
-if [ -n "$MAIN_NIC" ]; then
-    gateway_ipv6=$(ip -6 route | grep "default via" | awk '{print $3}' | head -1)
-    if [ -n "$gateway_ipv6" ]; then
-        echo "测试IPv6网关连通性: $gateway_ipv6"
-        if ping6 -c 3 -W 2 "$gateway_ipv6" > /dev/null 2>&1; then
-            echo "【SUCCESS】：IPv6网关连通正常"
+    ## 验证IPv6配置
+    echo "==================== IPv6配置验证 ===================="
+
+    # 验证主网卡是否获得IPv6地址
+    if [ -n "$MAIN_NIC" ]; then
+        echo "检查主网卡 $MAIN_NIC 的IPv6配置..."
+
+        # 显示网卡IPv6地址
+        ipv6_addrs=$(ip -6 addr show dev "$MAIN_NIC" | grep "inet6" | grep -v "fe80" | awk '{print $2}' | cut -d'/' -f1)
+
+        if [ -n "$ipv6_addrs" ]; then
+            echo "【SUCCESS】：主网卡已获得IPv6地址:"
+            echo "$ipv6_addrs"
         else
-            echo "【WARNING】：IPv6网关连通失败"
+            echo "【WARNING】：主网卡未获得非链路本地IPv6地址"
+        fi
+
+        # 显示所有IPv6地址（包括链路本地）
+        echo "主网卡所有IPv6地址:"
+        ip -6 addr show dev "$MAIN_NIC" | grep "inet6" | awk '{print "  " $2}'
+
+        # 验证期望的IPv6地址是否存在
+        if [ -n "$IPV6_ADDR" ]; then
+            if ip -6 addr show dev "$MAIN_NIC" | grep -q "$IPV6_ADDR"; then
+                echo "【SUCCESS】：期望的IPv6地址 $IPV6_ADDR 已配置"
+            else
+                echo "【ERROR】：期望的IPv6地址 $IPV6_ADDR 未找到"
+                exit 1
+            fi
+        fi
+    else
+        echo "【ERROR】：无法验证IPv6配置，主网卡未识别"
+        exit 1
+    fi
+
+    # 验证IPv6路由
+    echo "==================== IPv6路由验证 ===================="
+    ipv6_routes=$(ip -6 route | grep -v "^fd00")
+    if [ -n "$ipv6_routes" ]; then
+        echo "IPv6路由表:"
+
+        echo "$ipv6_routes"
+    else
+        echo "【WARNING】：未发现IPv6路由"
+    fi
+
+    # 验证IPv6连通性（ping网关）
+    if [ -n "$MAIN_NIC" ]; then
+        gateway_ipv6=$(ip -6 route | grep "default via" | awk '{print $3}' | head -1)
+        if [ -n "$gateway_ipv6" ]; then
+            echo "测试IPv6网关连通性: $gateway_ipv6"
+            if ping6 -c 3 -W 2 "$gateway_ipv6" > /dev/null 2>&1; then
+                echo "【SUCCESS】：IPv6网关连通正常"
+            else
+                echo "【WARNING】：IPv6网关连通失败"
+            fi
         fi
     fi
+
+    # 验证系统IPv6参数
+    echo "==================== 系统IPv6参数验证 ===================="
+    sysctl_params=(
+        "net.ipv6.conf.all.disable_ipv6"
+        "net.ipv6.conf.default.disable_ipv6"
+        "net.ipv6.conf.lo.disable_ipv6"
+        "net.ipv6.conf.all.forwarding"
+        "net.ipv6.conf.default.forwarding"
+    )
+
+    for param in "${sysctl_params[@]}"; do
+        value=$(sysctl -n "$param" 2>/dev/null)
+        if [ $? -eq 0 ]; then
+            echo "  $param = $value"
+        else
+            echo "  $param = 未找到"
+        fi
+    done
+
+    echo "==================== IPv6配置完成 ===================="
+    echo "IPv6配置已完成并验证"
+else
+    echo "双栈模式未启用，跳过IPv6相关验证"
 fi
-
-# 验证系统IPv6参数
-echo "==================== 系统IPv6参数验证 ===================="
-sysctl_params=(
-    "net.ipv6.conf.all.disable_ipv6"
-    "net.ipv6.conf.default.disable_ipv6"
-    "net.ipv6.conf.lo.disable_ipv6"
-    "net.ipv6.conf.all.forwarding"
-    "net.ipv6.conf.default.forwarding"
-)
-
-for param in "${sysctl_params[@]}"; do
-    value=$(sysctl -n "$param" 2>/dev/null)
-    if [ $? -eq 0 ]; then
-        echo "  $param = $value"
-    else
-        echo "  $param = 未找到"
-    fi
-done
-
-echo "==================== IPv6配置完成 ===================="
-echo "IPv6配置已完成并验证"

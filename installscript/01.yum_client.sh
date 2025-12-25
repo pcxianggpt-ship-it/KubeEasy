@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 参数说明
-# $1 registry ip 
+# $1 k8sc1 ip 
 # $2 当前机器ip
 
 

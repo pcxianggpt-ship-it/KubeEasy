@@ -1192,18 +1192,19 @@ configure_hostname_hosts() {
     log_info "控制节点: ${#master_ips[@]} 个"
     log_info "工作节点: ${#worker_ips[@]} 个"
 
+    set -x
     # 分发hosts文件到所有k8s节点
     log_info "分发hosts文件到所有节点..."
     local failed_hosts=()
     for server_ip in "${k8s_nodes[@]}"; do
-        if distribute_file "$temp_hosts_file" "/etc/hosts" "$server_ip"; then
+        if distribute_file "$temp_hosts_file" "/etc" "$server_ip"; then
             log_success "hosts文件分发成功: $server_ip"
         else
             log_error "hosts文件分发失败: $server_ip"
             failed_hosts+=("$server_ip")
         fi
     done
-
+set +x
     # 配置控制节点主机名
     log_info "配置控制节点主机名..."
     for ip in "${master_ips[@]}"; do
@@ -1297,15 +1298,15 @@ configure_environment() {
             done
         fi
 
-        if [ -z "$ipv6_addr" ]; then
+        if [ -z "$ipv6_addr" && $DUAL_STACK = "Y" ]; then
             log_error "无法获取节点 $server_ip 的IPv6地址，使用默认值"
-            ipv6_addr="fd00:42::171"
+            exit 1
         fi
 
         log_info "节点 $server_ip 使用IPv6地址: $ipv6_addr"
 
         # 执行环境配置脚本，传入data_path和IPv6地址
-        if ssh_execute_script "$server_ip" "installscript/01.set-env.sh" "$data_path $ipv6_addr" "配置环境变量"; then
+        if ssh_execute_script "$server_ip" "installscript/01.set-env.sh" "$DUAL_STACK $ipv6_addr" "配置环境变量"; then
             log_success "环境变量配置成功: $server_ip (IPv6: $ipv6_addr)"
         else
             log_error "环境变量配置失败: $server_ip"
@@ -1422,11 +1423,7 @@ install_docker() {
     return 0
 }
 
-# 检查Containerd是否已安装
-check_containerd_installed() {
-    local server="$1"
-    ssh_execute "$server" "containerd --version" >/dev/null 2>&1
-}
+
 
 # 安装Containerd (for K8s v1.30.14)
 install_containerd() {
@@ -1442,26 +1439,23 @@ install_containerd() {
     log_info "分发Containerd二进制文件到所有节点"
 
     # 使用distribute_file函数分发containerd相关目录
+    set -x
     distribute_file "$data_path/02.container_runtime" "/tmp/k8s" "${all_nodes[@]}"
-
+    set +x
     for server_ip in "${all_nodes[@]}"; do
-        if ! check_containerd_installed "$server_ip"; then
-            log_info "在节点 $server_ip 配置Containerd服务"
-            if ssh_execute_script "$server_ip" "installscript/02.containerd_install.sh" "$registry_ip" "配置Containerd"; then
-                if check_containerd_installed "$server_ip"; then
-                    log_success "Containerd在节点 $server_ip 安装成功"
-                else
-                    log_error "Containerd在节点 $server_ip 安装失败"
-                    save_stage_status "containerd" "failed" "Containerd安装失败: $server_ip"
-                    return 1
-                fi
+        log_info "在节点 $server_ip 配置Containerd服务"
+        if ssh_execute_script "$server_ip" "installscript/02.containerd_install.sh" "$registry_ip" "配置Containerd"; then
+            if ssh_execute_check "$server_ip" "containerd --version" "验证Containerd安装"; then
+                log_success "Containerd在节点 $server_ip 安装成功"
             else
-                log_error "Containerd配置失败: $server_ip"
-                save_stage_status "containerd" "failed" "Containerd配置失败: $server_ip"
+                log_error "Containerd在节点 $server_ip 安装失败"
+                save_stage_status "containerd" "failed" "Containerd安装失败: $server_ip"
                 return 1
             fi
         else
-            log_info "Containerd已在节点 $server_ip 安装"
+            log_error "Containerd配置失败: $server_ip"
+            save_stage_status "containerd" "failed" "Containerd配置失败: $server_ip"
+            return 1
         fi
     done
 
@@ -1509,11 +1503,13 @@ verify_k8s_dependency_versions() {
             expected_kubelet_version="1.23.17"
             expected_kubeadm_version="1.23.17"
             expected_kubectl_version="1.23.17"
+            expected_cni_version="0.8.7"
             ;;
         "v1.30.14")
             expected_kubelet_version="1.30.14"
             expected_kubeadm_version="1.30.14"
             expected_kubectl_version="1.30.14"
+            expected_cni_version="1.4.0"
             ;;
         *)
             log_error "不支持的Kubernetes版本: $k8s_version"
@@ -1564,17 +1560,17 @@ verify_k8s_dependency_versions() {
     fi
 
     # 验证kubernetes-cni版本
-    local cni_version=$(ssh_execute "$server" "rpm -q kubernetes-cni 2>/dev/null | awk -F'-' '{print \$2}'" true)
+    local cni_version=$(ssh_execute "$server" "rpm -q kubernetes-cni 2>/dev/null | awk -F'-' '{print $3}'" true)
     if [ -n "$cni_version" ]; then
-        # 对于CNI版本，我们检查是否是兼容版本
-        if echo "$cni_version" | grep -E "^(0\.8\.|1\.)" >/dev/null; then
-            log_success "节点 $server kubernetes-cni版本兼容: $cni_version"
+        # 精确匹配CNI版本
+        if echo "$cni_version" | grep -q "$expected_cni_version"; then
+            log_success "节点 $server kubernetes-cni版本正确: $cni_version (期望: $expected_cni_version)"
         else
-            log_error "节点 $server kubernetes-cni版本可能不兼容: $cni_version"
+            log_error "节点 $server kubernetes-cni版本不匹配: 期望 $expected_cni_version, 实际 $cni_version"
             validation_failed=true
         fi
     else
-        log_error "节点 $server kubernetes-cni未安装"
+        log_error "节点 $server kubernetes-cni未安装或无法获取版本信息"
         validation_failed=true
     fi
 
@@ -1813,7 +1809,6 @@ configure_k8srepo_client() {
         local is_master1=false
         if [ "$node_ip" = "$k8sc1_ip" ]; then
             is_master1=true
-            break
         fi
         if [ "$is_master1" = false ]; then
             client_nodes+=("$node_ip")
@@ -1844,7 +1839,9 @@ configure_k8srepo_client() {
             return 1
         fi
     else
-        log_info "没有需要配置的客户端节点"
+        log_error "没有需要配置的客户端节点"
+        save_stage_status "local_yum_client" "failed" "没有需要配置的客户端节点"
+        return 1
     fi
 
     # 4. 验证：执行yum search kubelet，有结果打印出来则为成功
