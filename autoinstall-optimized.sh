@@ -496,13 +496,14 @@ distribute_file() {
 
 
     for server in "${servers[@]}"; do
-        # 对于文件，需要确保远程目录存在
+        # 对于文件或目录，都需要确保远程父目录存在
         if [ "$item_type" = "文件" ]; then
-            # 创建远程目录（如果不存在）
-            ssh_execute "$server" "mkdir -p $remote_path" >/dev/null 2>&1
+            # 获取远程文件的父目录并创建
+            local remote_dir=$(dirname "$remote_path")
+            ssh_execute "$server" "mkdir -p $remote_dir" >/dev/null 2>&1
             local full_remote_path="$remote_path"
         elif [ "$item_type" = "目录" ]; then
-            # 创建远程目录（如果不存在）
+            # 创建远程父目录
             ssh_execute "$server" "mkdir -p $remote_path" >/dev/null 2>&1
             # 获取本地目录名
             local dir_name=$(basename "$local_path")
@@ -1197,7 +1198,7 @@ configure_hostname_hosts() {
     log_info "分发hosts文件到所有节点..."
     local failed_hosts=()
     for server_ip in "${k8s_nodes[@]}"; do
-        if distribute_file "$temp_hosts_file" "/etc" "$server_ip"; then
+        if distribute_file "$temp_hosts_file" "/etc/hosts" "$server_ip"; then
             log_success "hosts文件分发成功: $server_ip"
         else
             log_error "hosts文件分发失败: $server_ip"
@@ -2029,7 +2030,8 @@ init_cluster() {
         fi
 
         # 检查节点状态
-        local ready_nodes=$(kubectl get nodes --no-headers | grep -c "Ready")
+        local ready_nodes=$(kubectl get nodes --no-headers 2>/dev/null | grep -c "Ready" || true)
+        ready_nodes=${ready_nodes:-0}  # 确保是数字
         if [ "$ready_nodes" -gt 0 ]; then
             log_success "集群节点状态正常，就绪节点数: $ready_nodes"
         else
@@ -2064,7 +2066,8 @@ configure_cni_network() {
 
     # 3. 检查Flannel是否已经运行
     log_info "检查Flannel Pod状态"
-    local running_flannel_pods=$(kubectl get pod -A | grep kube-flannel | grep Running | wc -l)
+    local running_flannel_pods=$(kubectl get pod -A 2>/dev/null | grep kube-flannel | grep Running | wc -l)
+    running_flannel_pods=${running_flannel_pods:-0}  # 确保是数字
 
     if [ "$running_flannel_pods" -eq "${#k8s_nodes[@]}" ]; then
         log_success "Flannel已在所有节点上运行正常 (${running_flannel_pods}/${#k8s_nodes[@]})"
@@ -2098,11 +2101,12 @@ configure_cni_network() {
     # 5. 等待Flannel Pod启动
     log_info "等待Flannel Pod启动..."
     local flannel_counter=1
-    local max_attempts=30
+    local max_attempts=6
     local wait_time=10
 
     while [ $flannel_counter -le $max_attempts ]; do
         local running_pods=$(kubectl get pod -n kube-flannel 2>/dev/null | grep -i Running | wc -l)
+        running_pods=${running_pods:-0}  # 确保是数字
 
         if [ "$running_pods" -eq "${#k8s_nodes[@]}" ]; then
             log_success "Flannel启动成功 ($running_pods/${#k8s_nodes[@]} 个Pod运行中)"
@@ -2118,6 +2122,7 @@ configure_cni_network() {
     # 6. 检查最终状态
     log_error "Flannel启动超时或失败"
     local final_running_pods=$(kubectl get pod -n kube-flannel 2>/dev/null | grep -i Running | wc -l)
+    final_running_pods=${final_running_pods:-0}  # 确保是数字
     log_error "最终状态: $final_running_pods/${#k8s_nodes[@]} 个Pod运行"
 
     # 显示Pod状态用于调试
@@ -2166,7 +2171,8 @@ join_worker_nodes() {
         log_info "处理工作节点: $worker_ip"
 
         # 检查节点是否已加入集群
-        local existing_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$worker_ip" || echo "0")
+        local existing_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$worker_ip" || true)
+        existing_nodes=${existing_nodes:-0}  # 如果为空则设为0
         if [ "$existing_nodes" -eq 1 ]; then
             log_success "工作节点 $worker_ip 已在集群中，跳过加入"
             success_nodes+=("$worker_ip")
@@ -2183,7 +2189,8 @@ join_worker_nodes() {
             sleep 30
 
             # 再次检查节点是否成功加入
-            local joined_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$worker_ip" || echo "0")
+            local joined_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$worker_ip" || true)
+            joined_nodes=${joined_nodes:-0}  # 如果为空则设为0
             if [ "$joined_nodes" -eq 1 ]; then
                 log_success "工作节点 $worker_ip 加入集群成功"
                 success_nodes+=("$worker_ip")
@@ -2246,7 +2253,8 @@ join_master_nodes() {
         log_info "处理主控节点: $master_ip"
 
         # 检查节点是否已加入集群
-        local existing_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$master_ip" || echo "0")
+        local existing_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$master_ip" || true)
+        existing_nodes=${existing_nodes:-0}  # 如果为空则设为0
         if [ "$existing_nodes" -eq 1 ]; then
             log_success "主控节点 $master_ip 已在集群中，跳过加入"
             success_nodes+=("$master_ip")
@@ -2263,7 +2271,8 @@ join_master_nodes() {
             sleep 60
 
             # 再次检查节点是否成功加入
-            local joined_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$master_ip" || echo "0")
+            local joined_nodes=$(kubectl get nodes -o wide --no-headers 2>/dev/null | grep -c "$master_ip" || true)
+            joined_nodes=${joined_nodes:-0}  # 如果为空则设为0
             if [ "$joined_nodes" -eq 1 ]; then
                 log_success "主控节点 $master_ip 加入集群成功"
                 success_nodes+=("$master_ip")
@@ -2368,7 +2377,7 @@ configure_nfs_storage() {
     kubectl create namespace nfs --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
 
     # 构建helm安装命令
-    local helm_chart_path="$data_path/03.setup_file/allyaml/nfs"
+    local helm_chart_path="$data_path/03.setup_file/allyaml/$k8s_version/"
     local release_name="nfs-subdir-external-provisioner"
 
     # 检查helm chart路径是否存在
