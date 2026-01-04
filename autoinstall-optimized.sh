@@ -2677,100 +2677,101 @@ main() {
 
 
     # 加载配置（包括初始化所有节点变量）
+    log_info "第二步: 加载配置"
     load_config "$config_file"
 
-    log_info "第一步: 配置本地yum源"
+    log_info "第三步: 配置本地yum源"
     if ! configure_k8srepo_server; then
-        log_error "安装失败在步骤: 配置SSH免密登录"
+        log_error "安装失败在步骤: 配置本地yum源"
         exit 1
     fi
 
     # 执行安装步骤
-    log_info "第二步: 配置SSH免密登录"
+    log_info "第四步: 配置SSH免密登录"
     if ! setup_ssh_keyless; then
         log_error "安装失败在步骤: 配置SSH免密登录"
         exit 1
     fi
 
-    # 配置本地k8s repo源
-    log_info "检查和配置本地k8s repo源"
+    # 配置本地k8s repo源客户端
+    log_info "第五步: 配置本地k8s repo源客户端"
     if ! configure_k8srepo_client; then
-        log_error "安装失败在步骤: 配置本地k8s repo源"
+        log_error "安装失败在步骤: 配置本地k8s repo源客户端"
         exit 1
     fi
 
-    log_info "第三步: 替换kubeadm为支持100年证书版本"
+    log_info "第六步: 替换kubeadm为支持100年证书版本"
     if ! replace_kubeadm_local; then
         log_error "安装失败在步骤: 替换kubeadm"
         exit 1
     fi
 
-    log_info "第四步: 安装K8s依赖包"
+    log_info "第七步: 安装K8s依赖包"
     if ! install_k8s_dependencies; then
         log_error "安装失败在步骤: 安装K8s依赖包"
         exit 1
     fi
-    log_info "第五步: 配置主机名和hosts文件"
+    log_info "第八步: 配置主机名和hosts文件"
     if ! configure_hostname_hosts; then
         log_error "安装失败在步骤: 配置主机名和hosts文件"
         exit 1
     fi
 
-    log_info "第六步: 配置环境变量"
+    log_info "第九步: 配置环境变量"
     if ! configure_environment; then
         log_error "安装失败在步骤: 配置环境变量"
         exit 1
     fi
 
-    log_info "第七步: 配置DNS服务"
+    log_info "第十步: 配置DNS服务"
     if ! configure_dns; then
         log_error "安装失败在步骤: 配置DNS服务"
         exit 1
     fi
 
-    log_info "第八步: 安装容器运行时"
+    log_info "第十一步: 安装容器运行时"
     if ! install_container_runtime; then
         log_error "安装失败在步骤: 安装容器运行时"
         exit 1
     fi
 
-    log_info "第九步: 安装镜像仓库"
+    log_info "第十二步: 安装镜像仓库"
     if ! install_registry; then
         log_error "安装失败在步骤: 安装镜像仓库"
         exit 1
     fi
 
-    log_info "第十步: 初始化集群"
+    log_info "第十三步: 初始化集群"
     if ! init_cluster; then
         log_error "安装失败在步骤: 初始化集群"
         exit 1
     fi
 
-    log_info "第十一步: 加入主控节点"
+    log_info "第十四步: 加入主控节点"
     if ! join_master_nodes; then
         log_error "安装失败在步骤: 加入主控节点"
         exit 1
     fi
 
-    log_info "第十二步: 加入工作节点"
+    log_info "第十五步: 加入工作节点"
     if ! join_worker_nodes; then
         log_error "安装失败在步骤: 加入工作节点"
         exit 1
     fi
 
-    log_info "第十三步: 配置网络组件"
+    log_info "第十六步: 配置网络组件"
     if ! configure_cni_network; then
         log_error "安装失败在步骤: 配置网络组件"
         exit 1
     fi
 
-    log_info "第十四步: 配置存储组件"
+    log_info "第十七步: 配置存储组件"
     if ! configure_nfs_storage; then
         log_error "安装失败在步骤: 配置存储组件"
         exit 1
     fi
 
-    log_info "第十五步: 安装集群插件"
+    log_info "第十八步: 安装集群插件"
     if ! install_addons; then
         log_error "安装失败在步骤: 安装集群插件"
         exit 1
