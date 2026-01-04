@@ -216,6 +216,12 @@ log_debug() {
     echo "[$timestamp] [DEBUG] $message" | tee -a "$LOG_FILE"
 }
 
+log_warning() {
+    local message="$1"
+    local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [WARNING] $message" | tee -a "$LOG_FILE"
+}
+
 # 阶段状态检查和记录
 exit_status_check() {
     local operation="$1"
@@ -2444,6 +2450,212 @@ configure_nfs_storage() {
     log_info "存储类名称: $storage_class"
     log_info "NFS服务器: $nfs_server_ip:$nfs_path"
     return 0
+}
+
+#=============================================================================
+# 集群插件安装函数
+#=============================================================================
+
+# 安装集群插件
+install_addons() {
+    if is_stage_completed "addons"; then
+        log_info "集群插件安装已完成，跳过"
+        return 0
+    fi
+
+    log_info "开始安装集群插件"
+    save_stage_status "addons" "in_progress" "安装集群插件"
+
+
+    kubectl apply -f $data_path/03.setup_file/allyaml/0.kubemate-namespace.yaml
+    kubectl apply -f $data_path/03.setup_file/allyaml/1.kubemate.yml
+    kubectl apply -f $data_path/03.setup_file/allyaml/1.kubemate.yml
+    kubectl apply -f $data_path/03.setup_file/allyaml/5.traefik-ds.yml
+    kubectl apply -f $data_path/03.setup_file/allyaml/5.traefik-ds.yml
+    kubectl apply -f $data_path/03.setup_file/allyaml/prometheus
+
+}
+
+#=============================================================================
+# Pod 状态检查函数
+#=============================================================================
+
+# 检查 Pod 状态
+check_pods_status() {
+    local namespace="${1:-}"
+    local timeout="${2:-300}"  # 默认超时5分钟
+    local label_selector="${3:-}"
+
+    if [ -z "$namespace" ]; then
+        log_error "请指定要检查的命名空间"
+        return 1
+    fi
+
+    log_info "检查命名空间 $namespace 中的 Pod 状态..."
+
+    local start_time=$(date +%s)
+    local timeout_end=$((start_time + timeout))
+    local check_interval=5
+    local all_ready=false
+
+    while [ $(date +%s) -lt $timeout_end ]; do
+        # 获取 Pod 列表和状态
+        local pod_info
+        if [ -n "$label_selector" ]; then
+            pod_info=$(kubectl get pods -n "$namespace" -l "$label_selector" --no-headers 2>/dev/null)
+        else
+            pod_info=$(kubectl get pods -n "$namespace" --no-headers 2>/dev/null)
+        fi
+
+        if [ -z "$pod_info" ]; then
+            log_warning "命名空间 $namespace 中没有找到 Pod"
+            return 1
+        fi
+
+        local total_pods=0
+        local ready_pods=0
+        local failed_pods=0
+        local pending_pods=0
+        local not_ready_pods=()
+
+        # 分析每个 Pod 的状态
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+
+            total_pods=$((total_pods + 1))
+
+            local pod_name=$(echo "$line" | awk '{print $1}')
+            local ready=$(echo "$line" | awk '{print $2}' | cut -d'/' -f1)
+            local desired=$(echo "$line" | awk '{print $2}' | cut -d'/' -f2)
+            local status=$(echo "$line" | awk '{print $3}')
+            local restarts=$(echo "$line" | awk '{print $4}')
+
+            case "$status" in
+                "Running")
+                    if [ "$ready" -eq "$desired" ]; then
+                        ready_pods=$((ready_pods + 1))
+                    else
+                        not_ready_pods+=("$pod_name (Ready: $ready/$desired)")
+                    fi
+                    ;;
+                "Completed")
+                    ready_pods=$((ready_pods + 1))
+                    ;;
+                "Failed")
+                    failed_pods=$((failed_pods + 1))
+                    not_ready_pods+=("$pod_name (Status: $status, Restarts: $restarts)")
+                    ;;
+                "Pending")
+                    pending_pods=$((pending_pods + 1))
+                    not_ready_pods+=("$pod_name (Status: $status)")
+                    ;;
+                *)
+                    not_ready_pods+=("$pod_name (Status: $status)")
+                    ;;
+            esac
+        done <<< "$pod_info"
+
+        # 显示当前状态
+        log_info "命名空间 $namespace - 就绪: $ready_pods/$total_pods, 失败: $failed_pods, 等待中: $pending_pods"
+
+        # 检查是否所有 Pod 都就绪
+        if [ $ready_pods -eq $total_pods ] && [ $failed_pods -eq 0 ] && [ $pending_pods -eq 0 ]; then
+            all_ready=true
+            log_success "命名空间 $namespace 中所有 Pod 已就绪"
+            break
+        fi
+
+        # 如果有失败的 Pod，显示详细信息并返回错误
+        if [ $failed_pods -gt 0 ]; then
+            log_error "命名空间 $namespace 中有 $failed_pods 个 Pod 失败"
+            log_error "失败的 Pod: ${not_ready_pods[*]}"
+            return 1
+        fi
+
+        # 等待一段时间后再次检查
+        sleep $check_interval
+    done
+
+    # 超时检查
+    if [ "$all_ready" = "false" ]; then
+        log_error "检查命名空间 $namespace 的 Pod 状态超时（${timeout}秒）"
+        log_error "未就绪的 Pod:"
+        for pod in "${not_ready_pods[@]}"; do
+            log_error "  - $pod"
+        done
+
+        # 显示详细的 Pod 状态用于调试
+        log_info "详细的 Pod 状态:"
+        if [ -n "$label_selector" ]; then
+            kubectl get pods -n "$namespace" -l "$label_selector" -o wide 2>/dev/null || true
+        else
+            kubectl get pods -n "$namespace" -o wide 2>/dev/null || true
+        fi
+        return 1
+    fi
+
+    return 0
+}
+
+# 批量检查多个命名空间的 Pod 状态
+check_multiple_namespaces() {
+    local namespaces=("$@")
+    local failed_namespaces=()
+
+    log_info "检查 ${#namespaces[@]} 个命名空间的 Pod 状态"
+
+    for namespace in "${namespaces[@]}"; do
+        if ! check_pods_status "$namespace" 300; then
+            failed_namespaces+=("$namespace")
+        fi
+    done
+
+    if [ ${#failed_namespaces[@]} -eq 0 ]; then
+        log_success "所有命名空间的 Pod 状态检查通过"
+        return 0
+    else
+        log_error "以下命名空间的 Pod 状态检查失败: ${failed_namespaces[*]}"
+        return 1
+    fi
+}
+
+# 检查集群整体健康状态
+check_cluster_health() {
+    log_info "检查集群整体健康状态..."
+
+    local system_namespaces=("kube-system" "kube-public" "kube-flannel")
+    local addon_namespaces=("kubemate" "traefik" "monitoring" "nfs")
+    local all_healthy=true
+
+    # 检查系统命名空间
+    log_info "检查系统命名空间..."
+    for ns in "${system_namespaces[@]}"; do
+        if kubectl get namespace "$ns" >/dev/null 2>&1; then
+            if ! check_pods_status "$ns" 60; then
+                log_warning "系统命名空间 $ns 存在问题"
+                all_healthy=false
+            fi
+        fi
+    done
+
+    # 检查插件命名空间
+    log_info "检查插件命名空间..."
+    for ns in "${addon_namespaces[@]}"; do
+        if kubectl get namespace "$ns" >/dev/null 2>&1; then
+            if ! check_pods_status "$ns" 120; then
+                log_warning "插件命名空间 $ns 存在问题"
+                all_healthy=false
+            fi
+        fi
+    done
+
+    if [ "$all_healthy" = "true" ]; then
+        log_success "集群整体健康状态良好"
+        return 0
+    else
+        log_error "集群存在健康问题，请检查上述错误"
+        return 1
+    fi
 }
 
 #=============================================================================
