@@ -2383,7 +2383,7 @@ configure_nfs_storage() {
     kubectl create namespace nfs --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1
 
     # 构建helm安装命令
-    local helm_chart_path="$data_path/03.setup_file/allyaml/$k8s_version/"
+    local helm_chart_path="$data_path/03.setup_file/allyaml/"
     local release_name="nfs-subdir-external-provisioner"
 
     # 检查helm chart路径是否存在
