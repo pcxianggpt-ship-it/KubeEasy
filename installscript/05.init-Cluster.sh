@@ -281,8 +281,9 @@ else
     if [[ $ca_99y_count -ge 10 ]]; then
         echo "【SUCCESS】： 证书有效期配置正确 (99年证书数量: $ca_99y_count)"
     else
-        echo "【WARNING】： 证书有效期可能不是99年，建议执行 'kubeadm certs check-expiration' 查看详情"
-        echo "如果需要更新证书有效期，请参考相关文档操作"
+        echo "【ERROR】： 证书有效期不是99年，集群初始化失败！"
+        echo "请检查证书配置并重新初始化集群"
+        exit 1
     fi
 fi
 

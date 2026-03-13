@@ -1199,7 +1199,7 @@ configure_hostname_hosts() {
     log_info "控制节点: ${#master_ips[@]} 个"
     log_info "工作节点: ${#worker_ips[@]} 个"
 
-    set -x
+
     # 分发hosts文件到所有k8s节点
     log_info "分发hosts文件到所有节点..."
     local failed_hosts=()
@@ -1211,7 +1211,7 @@ configure_hostname_hosts() {
             failed_hosts+=("$server_ip")
         fi
     done
-set +x
+
     # 配置控制节点主机名
     log_info "配置控制节点主机名..."
     for ip in "${master_ips[@]}"; do
@@ -1812,7 +1812,7 @@ configure_k8srepo_client() {
 
     # 分发01.yum_client.sh脚本到所有非本机节点
     local client_nodes=()
-    for node_ip in "${all_nodes[@]}"; do
+    for node_ip in "${k8s_nodes[@]}"; do
         local is_master1=false
         if [ "$node_ip" = "$k8sc1_ip" ]; then
             is_master1=true
@@ -1832,7 +1832,7 @@ configure_k8srepo_client() {
             log_info "在客户端节点 $client_ip 配置YUM源"
 
             # 使用ssh_execute_script执行01.yum_client.sh脚本 (参数1: registry IP)
-            if ssh_execute_script "$client_ip" "installscript/01.yum_client.sh" "${registry_ips[0]}" "配置YUM客户端"; then
+            if ssh_execute_script "$client_ip" "installscript/01.yum_client.sh" "${master_ips[0]}" "配置YUM客户端"; then
                 log_success "YUM客户端配置成功: $client_ip"
             else
                 log_error "YUM客户端配置失败: $client_ip"
@@ -1949,7 +1949,7 @@ replace_kubeadm_local() {
 
     if [[ -f "$kubeadm_100y_file" ]]; then
         # 复制文件并设置执行权限
-        cp "$kubeadm_100y_file" /usr/bin/kubeadm
+        scp "$kubeadm_100y_file" /usr/bin/kubeadm
         if [[ $? -eq 0 ]]; then
             chmod +x /usr/bin/kubeadm
             if [[ $? -eq 0 ]]; then
